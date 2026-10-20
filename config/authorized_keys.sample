@@ -1,0 +1,2 @@
+# Public SSH keys allowed to log in as ADMIN_USER, one per line. Copy to config/authorized_keys
+# and paste yours (e.g. the contents of ~/.ssh/id_ed25519.pub). Lines starting with # are ignored.

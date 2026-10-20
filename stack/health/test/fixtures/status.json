@@ -1,0 +1,34 @@
+{
+  "updated": "2026-10-20T02:31:10Z",
+  "logical": {
+    "last_attempt": "2026-10-20T02:00:00Z",
+    "last_success": "2026-10-20T02:04:12Z",
+    "last_error": null,
+    "databases": {
+      "alted": { "file": "alted-20261020T0200Z.dump.age", "bytes": 12345, "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "verified": true }
+    }
+  },
+  "physical": {
+    "enabled": true,
+    "last_attempt": "2026-10-20T01:30:00Z",
+    "last_success": "2026-10-20T01:41:55Z",
+    "last_type": "diff",
+    "last_full": "2026-10-18T01:30:00Z",
+    "last_error": null,
+    "repo_bytes": 987654321
+  },
+  "upload": {
+    "enabled": true,
+    "destination": "dropbox:CX_PGSQL_Node_1",
+    "last_attempt": "2026-10-20T02:10:00Z",
+    "last_success": "2026-10-20T02:12:30Z",
+    "last_error": null,
+    "bytes_transferred": 12345
+  },
+  "verify": {
+    "last_attempt": "2026-10-19T03:00:00Z",
+    "last_success": "2026-10-19T03:20:00Z",
+    "last_error": null,
+    "databases": { "alted": { "tables": 95, "ok": true } }
+  }
+}

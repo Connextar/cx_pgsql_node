@@ -1,0 +1,184 @@
+# CX_PGSQL_Node_1 — the database stack.
+#
+# Deployed to $STACK_DIR by `setup.sh apply stack`, which writes the .env this file reads,
+# the configuration under ./config, the certificates under ./certs and per-container copies
+# of the secrets under ./secrets. Don't edit those generated files: change config/server.env
+# (or the templates) and re-run the setup.
+#
+# Inside Docker every service listens on its usual port (Postgres 5432, PgBouncer 6432);
+# the host publishes them on the alternative ports from config/server.env.
+name: ${COMPOSE_PROJECT_NAME}
+
+services:
+  postgres:
+    build:
+      context: ./postgres
+      args:
+        PG_VERSION: ${PG_VERSION}
+        PG_IMAGE_VARIANT: ${PG_IMAGE_VARIANT}
+    image: cx-pgsql/postgres:${PG_VERSION}
+    container_name: ${PG_CONTAINER}
+    restart: unless-stopped
+    shm_size: 256m
+    stop_grace_period: 2m
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/cx-secrets/postgres-password
+      POSTGRES_INITDB_ARGS: "--data-checksums --auth-local=peer --auth-host=scram-sha-256"
+      PGDATA: /var/lib/postgresql/data
+      TZ: UTC
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    volumes:
+      - ${PG_DATA_DIR}:/var/lib/postgresql/data
+      - ./config/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./config/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./config/postgres/conf.d:/etc/postgresql/conf.d:ro
+      - ./config/pgbackrest:/etc/pgbackrest:ro
+      - ./certs:/etc/cx-certs:ro
+      - ./secrets/postgres:/run/cx-secrets:ro
+      - ./logs/postgres:/var/log/postgresql
+      - ./logs/pgbackrest:/var/log/pgbackrest
+      - ${BACKUP_ROOT}/pgbackrest:/backups/pgbackrest
+    ports:
+      - "${PG_DIRECT_BIND}:${PG_DIRECT_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: ${PG_MEMORY_LIMIT_VALUE}
+    networks: [db]
+
+  pgbouncer:
+    build:
+      context: ./pgbouncer
+      args:
+        PG_VERSION: ${PG_VERSION}
+        PG_IMAGE_VARIANT: ${PG_IMAGE_VARIANT}
+    image: cx-pgsql/pgbouncer:${PG_VERSION}
+    container_name: ${PGBOUNCER_CONTAINER}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config/pgbouncer:/etc/pgbouncer:ro
+      - ./certs:/etc/cx-certs:ro
+      - ./logs/pgbouncer:/var/log/pgbouncer
+    ports:
+      - "${PGBOUNCER_BIND}:${PGBOUNCER_PUBLIC_PORT}:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -p 6432 -U cx_monitor -d pgbouncer"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: ${PGBOUNCER_MEMORY_LIMIT}
+    networks: [db]
+
+  health:
+    build: ./health
+    image: cx-pgsql/health:local
+    container_name: ${HEALTH_CONTAINER}
+    restart: unless-stopped
+    user: "${HEALTH_UID}:${HEALTH_UID}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HEALTH_PORT: "8080"
+      HEALTH_TOKEN_FILE: /run/cx-secrets/health-token
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DATABASE: postgres
+      PG_USER: cx_monitor
+      PG_PASSWORD_FILE: /run/cx-secrets/cx-monitor-password
+      PGBOUNCER_HOST: pgbouncer
+      PGBOUNCER_PORT: "6432"
+      PGBOUNCER_ENABLED: "true"
+      PGBOUNCER_PROBE_DATABASE: postgres
+      BACKUP_STATUS_FILE: /backups/status/status.json
+      CERT_FILE: /certs/server.crt
+      DATA_DIR: /pgdata
+      LONG_QUERY_SECONDS: ${HEALTH_LONG_QUERY_SECONDS}
+      BACKUP_MAX_AGE_HOURS: ${HEALTH_BACKUP_MAX_AGE_HOURS}
+      UPLOAD_MAX_AGE_HOURS: ${HEALTH_UPLOAD_MAX_AGE_HOURS}
+      STATUS_INCLUDE_QUERY_TEXT: ${HEALTH_INCLUDE_QUERY_TEXT}
+    volumes:
+      - ./secrets/health:/run/cx-secrets:ro
+      - ${BACKUP_ROOT}/status:/backups/status:ro
+      - ./certs/server.crt:/certs/server.crt:ro
+      # Only for disk usage (statfs) of the filesystem holding the data directory.
+      - ${DATA_ROOT}:/pgdata:ro
+    ports:
+      - "127.0.0.1:${HEALTH_PORT}:8080"
+    deploy:
+      resources:
+        limits:
+          memory: ${HEALTH_MEMORY_LIMIT}
+    networks: [db]
+
+  n8n:
+    profiles: ["n8n"]
+    image: ${N8N_IMAGE}
+    container_name: ${N8N_CONTAINER}
+    restart: unless-stopped
+    user: "${N8N_UID}:${N8N_UID}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD_FILE: /run/cx-secrets/n8n-db-password
+      N8N_ENCRYPTION_KEY_FILE: /run/cx-secrets/n8n-encryption-key
+      N8N_HOST: ${N8N_FQDN}
+      N8N_PROTOCOL: https
+      N8N_PORT: "5678"
+      WEBHOOK_URL: https://${N8N_FQDN}/
+      N8N_PROXY_HOPS: "1"
+      GENERIC_TIMEZONE: ${TIMEZONE}
+      TZ: ${TIMEZONE}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      # It runs as its own uid, so its home (cache) and data live on its own volume.
+      HOME: /data
+      N8N_USER_FOLDER: /data
+    volumes:
+      - ${DATA_ROOT}/n8n:/data
+      - ./secrets/n8n:/run/cx-secrets:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    ports:
+      - "127.0.0.1:${N8N_PORT}:5678"
+    deploy:
+      resources:
+        limits:
+          memory: ${N8N_MEMORY_LIMIT}
+    networks: [db]
+
+networks:
+  db:
+    name: ${COMPOSE_PROJECT_NAME}_db
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET}

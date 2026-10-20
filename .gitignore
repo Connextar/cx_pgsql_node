@@ -1,0 +1,12 @@
+# This server's own settings and keys (samples are committed).
+config/server.env
+config/authorized_keys
+config/databases/*.env
+!config/databases/*.env.sample
+
+node_modules/
+.DS_Store
+.idea/
+*.log
+tests/.cache/
+tests/vps/root_authorized_keys

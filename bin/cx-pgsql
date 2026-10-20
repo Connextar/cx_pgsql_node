@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# cx-pgsql — day-to-day operations on the server (run as root; /usr/local/bin/cx-pgsql links here).
+#
+#   cx-pgsql info                              ports, endpoints, what's running, the deploy key
+#   cx-pgsql ps | logs [service] | restart [service] | psql [database] | health
+#
+#   cx-pgsql db list                           databases, owners, sizes; flags any not in config
+#   cx-pgsql db url <db> [--show-password]     connection strings (pooled, session, direct)
+#   cx-pgsql db rotate <db>                    new password for the database's login
+#   cx-pgsql db drop <db> --yes                drop a database (config files aren't touched)
+#   cx-pgsql db import <db> [--yes]            copy a database in from another server (e.g. Neon);
+#                                             the source URL is read from stdin, never the command line
+#
+#   cx-pgsql backup run                        logical + physical + upload (what the timers do)
+#   cx-pgsql backup logical|physical [auto|full|diff|incr]|upload|verify
+#   cx-pgsql backup status | list
+#   cx-pgsql backup dropbox-configure [--client-id ID --client-secret SECRET]   (token JSON on stdin)
+#
+#   cx-pgsql restore fetch [all|repo|dumps]    download backups from the remote
+#   cx-pgsql restore dump <db> [file|latest] [--into NAME | --replace --yes] [--identity KEY] [--no-owner]
+#   cx-pgsql restore pitr [--time "YYYY-MM-DD HH:MM:SS+00"] [--port 28439]   inspection copy
+#   cx-pgsql restore in-place [--time "…"] --yes                             replace the live cluster
+#   cx-pgsql restore cleanup
+#
+#   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export PROJECT_DIR
+# shellcheck disable=SC2034 # read by lib/core.sh
+LOG_FILE=/var/log/cx-pgsql.log
+# shellcheck source=../lib/core.sh
+source "$PROJECT_DIR/lib/core.sh"
+for _lib in tls dbconf pg backup restore; do
+  # shellcheck source=/dev/null
+  source "$PROJECT_DIR/lib/$_lib.sh"
+done
+trap 'err "Failed at ${BASH_SOURCE[0]##*/}:${LINENO}: ${BASH_COMMAND}"' ERR
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+[[ $# -gt 0 ]] || { usage; exit 0; }
+case $1 in -h | --help | help) usage; exit 0 ;; esac
+need_root
+load_config
+# shellcheck disable=SC2034 # read by lib/restore.sh
+YES=0
+
+_compose() { (cd "$STACK_DIR" && docker compose "$@"); }
+
+# ─── info / services ───────────────────────────────────────────────────────────────
+cmd_info() {
+  section "$SERVER_HOSTNAME ($SERVER_FQDN)"
+  printf '  SSH            port %s, user %s\n' "$SSH_PORT" "$ADMIN_USER"
+  printf '  PgBouncer      %s:%s  (TLS required from outside)\n' "$PGBOUNCER_BIND" "$PGBOUNCER_PUBLIC_PORT"
+  printf '  Postgres       %s:%s  (direct)\n' "$PG_DIRECT_BIND" "$PG_DIRECT_PORT"
+  printf '  Health         https://%s/healthz  ·  /status and /metrics need the token (cx-pgsql secret show health-token)\n' "$SERVER_FQDN"
+  is_true "$ENABLE_N8N" && printf '  n8n            https://%s/\n' "$N8N_FQDN"
+  printf '  TLS            %s (%s days left)\n' \
+    "$(tls_is_self_signed "$SERVER_FQDN" && echo 'self-signed placeholder' || echo "Let's Encrypt")" "$(tls_days_left "$SERVER_FQDN" || echo '?')"
+  printf '  Backups        %s → %s:%s\n' "$BACKUP_ROOT" "$BACKUP_REMOTE" "$BACKUP_REMOTE_PATH"
+  section "Containers"
+  _compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || warn "Stack not deployed."
+  local key
+  key="$(getent passwd "$ADMIN_USER" | cut -d: -f6)/.ssh/id_ed25519.pub"
+  if [[ -s "$key" ]]; then
+    section "Deploy key ($ADMIN_USER) — add to GitHub/Bitbucket to clone repositories"
+    cat "$key"
+  fi
+}
+
+cmd_health() {
+  local token
+  token=$(cat "$(secret_path health-token)")
+  curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$HEALTH_PORT/status" | jq .
+}
+
+# ─── db ────────────────────────────────────────────────────────────────────────────
+_db_find() { # load one database's settings into this shell
+  local want=$1 line
+  line=$(db_each sh -c 'printf "%s|%s|%s|%s|%s\n" "$DB_NAME" "$DB_USER" "$DB_SECRET" "$DB_PGBOUNCER" "$DB_READONLY_USER"' | grep "^$want|" || true)
+  [[ -n "$line" ]] || die "No database '$want' in config/databases/ (or n8n)."
+  # shellcheck disable=SC2034 # DB_READONLY_USER kept for symmetry with db_each
+  IFS='|' read -r DB_NAME DB_USER DB_SECRET DB_PGBOUNCER DB_READONLY_USER <<<"$line"
+}
+
+cmd_db() {
+  local sub=${1:-list}
+  shift || true
+  case $sub in
+    list)
+      local configured
+      configured=" $(db_names | tr '\n' ' ') "
+      printf '%-24s %-20s %10s  %s\n' DATABASE OWNER SIZE NOTE
+      while IFS='|' read -r name owner size; do
+        local note=""
+        [[ "$configured" == *" $name "* ]] || note="not in config"
+        printf '%-24s %-20s %10s  %s\n' "$name" "$owner" "$size" "$note"
+      done < <(pg_value "SELECT string_agg(datname || '|' || pg_get_userbyid(datdba) || '|' || pg_size_pretty(pg_database_size(datname)), E'\n' ORDER BY datname) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")
+      ;;
+    url)
+      local name=${1:?database} show=0 pw host=$SERVER_FQDN mode=verify-full
+      [[ "${2:-}" == --show-password ]] && show=1
+      _db_find "$name"
+      pw='<password>'
+      ((show)) && pw=$(cat "$(secret_path "$DB_SECRET")")
+      tls_is_self_signed "$SERVER_FQDN" && mode=require
+      section "$DB_NAME (login $DB_USER)"
+      if is_true "$DB_PGBOUNCER"; then
+        printf 'Pooled (apps; transaction pooling):\n  postgresql://%s:%s@%s:%s/%s?sslmode=%s\n' "$DB_USER" "$pw" "$host" "$PGBOUNCER_PUBLIC_PORT" "$DB_NAME" "$mode"
+        printf 'Session (migrations, advisory locks, LISTEN/NOTIFY):\n  postgresql://%s:%s@%s:%s/%s_session?sslmode=%s\n' "$DB_USER" "$pw" "$host" "$PGBOUNCER_PUBLIC_PORT" "$DB_NAME" "$mode"
+      fi
+      if [[ "$PG_DIRECT_BIND" == 127.0.0.1 ]]; then
+        printf 'Direct (over an SSH tunnel: bin/remote.sh tunnel):\n  postgresql://%s:%s@localhost:%s/%s?sslmode=require\n' "$DB_USER" "$pw" "$PG_DIRECT_PORT" "$DB_NAME"
+      else
+        printf 'Direct:\n  postgresql://%s:%s@%s:%s/%s?sslmode=%s\n' "$DB_USER" "$pw" "$host" "$PG_DIRECT_PORT" "$DB_NAME" "$mode"
+      fi
+      ((show)) || info "Add --show-password to include the password."
+      [[ "$mode" == require ]] && warn "Self-signed certificate in use: sslmode=require (no verification) until Let's Encrypt issues one."
+      ;;
+    rotate)
+      local name=${1:?database}
+      _db_find "$name"
+      local path
+      path=$(secret_path "$DB_SECRET")
+      [[ -f "$path" ]] && cp -a "$path" "$path.previous"
+      rm -f "$path"
+      pg_set_password "$DB_USER" "$DB_SECRET"
+      docker kill -s HUP "$PGBOUNCER_CONTAINER" >/dev/null 2>&1 || true
+      ok "New password for $DB_USER (the old one is in $path.previous). Update the app, then: cx-pgsql db url $name --show-password"
+      ;;
+    import)
+      # The source URL arrives on stdin (it carries a password), so it never appears in `ps` or history.
+      local name=${1:?database} src tables
+      _db_find "$name"
+      [[ -t 0 ]] && printf 'Source connection URL (input hidden; use the direct, non-pooled one): ' >&2
+      IFS= read -r -s src
+      [[ -t 0 ]] && echo >&2
+      [[ "$src" == postgres* ]] || die "Expected a postgresql:// URL on stdin."
+      tables=$(pg_value "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" -d "$DB_NAME")
+      if [[ "$tables" != 0 && "${2:-}" != --yes ]]; then
+        die "$DB_NAME already has $tables tables. Add --yes to drop and recreate it before importing."
+      fi
+      if [[ "$tables" != 0 ]]; then
+        pg_sql -d postgres <<<"DROP DATABASE $DB_NAME WITH (FORCE);"
+        "$PROJECT_DIR/setup.sh" apply databases >/dev/null
+      fi
+      info "Copying into $DB_NAME (objects owned by $DB_USER)"
+      # pg_dump from the source, straight into pg_restore: nothing is written to disk.
+      printf '%s' "$src" | docker exec -i -u postgres "$PG_CONTAINER" sh -c '
+        set -e; url=$(cat)
+        pg_dump -Fc --no-owner --no-acl "$url" | pg_restore --no-owner --no-acl --exit-on-error --role="$1" -d "$2"
+      ' sh "$DB_USER" "$DB_NAME"
+      pg_value "ANALYZE" -d "$DB_NAME" >/dev/null
+      info "Now in $DB_NAME: $(pg_value "SELECT count(*) || ' tables, ' || coalesce(sum(n_live_tup), 0) || ' rows' FROM pg_stat_user_tables" -d "$DB_NAME")"
+      ok "Imported. Point the app at: cx-pgsql db url $DB_NAME --show-password"
+      ;;
+    drop)
+      local name=${1:?database}
+      [[ "${2:-}" == --yes ]] || die "Dropping $name deletes it. Add --yes."
+      pg_sql -d postgres <<<"DROP DATABASE IF EXISTS $name WITH (FORCE);"
+      ok "Dropped $name"
+      ;;
+    *) die "Unknown: db $sub" ;;
+  esac
+}
+
+# ─── backup ────────────────────────────────────────────────────────────────────────
+cmd_backup() {
+  local sub=${1:-status}
+  shift || true
+  case $sub in
+    logical) backup_lock; backup_logical ;;
+    physical) backup_lock; backup_physical "${1:-auto}" ;;
+    upload) backup_lock; backup_upload ;;
+    verify) backup_lock; backup_verify ;;
+    run)
+      backup_lock
+      # Each job in its own subshell: one failing (die exits) mustn't stop the others.
+      local failed=0
+      (backup_logical) || failed=1
+      (backup_physical auto) || failed=1
+      (backup_upload) || failed=1
+      exit $failed
+      ;;
+    status) jq . "$BACKUP_STATUS_FILE" ;;
+    list)
+      section "Dumps ($DUMPS_DIR)"
+      find "$DUMPS_DIR" -type f ! -name '*.sha256' ! -name '.*' -printf '%TY-%Tm-%Td %TH:%TM  %10s  %P\n' 2>/dev/null | sort -r | head -40
+      if is_true "$BACKUP_PITR"; then
+        section "pgBackRest"
+        pgbackrest info
+      fi
+      if remote_configured; then
+        section "Remote $(remote_dest)"
+        rclone_x size "$(remote_dest)" 2>/dev/null || true
+      fi
+      ;;
+    dropbox-configure)
+      local client_id="" client_secret="" token
+      while (($#)); do
+        case $1 in
+          --client-id) client_id=$2; shift ;;
+          --client-secret) client_secret=$2; shift ;;
+          *) die "Unknown option $1" ;;
+        esac
+        shift
+      done
+      ensure_pkgs rclone
+      token=$(cat)
+      jq -e '.access_token' >/dev/null <<<"$token" || die "Expected the token JSON from 'rclone authorize dropbox' on stdin."
+      install -d -m 0700 /etc/cx-pgsql
+      (
+        umask 077
+        {
+          printf '[%s]\ntype = dropbox\n' "$BACKUP_REMOTE"
+          [[ -n "$client_id" ]] && printf 'client_id = %s\n' "$client_id"
+          [[ -n "$client_secret" ]] && printf 'client_secret = %s\n' "$client_secret"
+          printf 'token = %s\n' "$(jq -c . <<<"$token")"
+        } >"$RCLONE_CONF"
+      )
+      rclone_x mkdir "$(remote_dest)"
+      rclone_x lsd "$(remote_dest)" >/dev/null
+      ok "Dropbox remote '$BACKUP_REMOTE' works; backups go to $(remote_dest)."
+      ;;
+    *) die "Unknown: backup $sub" ;;
+  esac
+}
+
+# ─── restore ───────────────────────────────────────────────────────────────────────
+cmd_restore() {
+  local sub=${1:-}
+  shift || true
+  case $sub in
+    fetch) backup_lock; restore_fetch "${1:-all}" ;;
+    dump) restore_dump "$@" ;;
+    pitr) restore_pitr "$@" ;;
+    in-place) backup_lock; restore_in_place "$@" ;;
+    cleanup) restore_cleanup ;;
+    *) die "restore fetch|dump|pitr|in-place|cleanup" ;;
+  esac
+}
+
+case $1 in
+  info) cmd_info ;;
+  ps) _compose ps ;;
+  logs) shift; _compose logs --tail 200 -f "$@" ;;
+  restart) shift; _compose restart "$@" ;;
+  psql) docker exec -it -u postgres "$PG_CONTAINER" psql -d "${2:-postgres}" ;;
+  health) cmd_health ;;
+  db) shift; cmd_db "$@" ;;
+  backup) shift; cmd_backup "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  secret)
+    [[ "${2:-}" == show && -n "${3:-}" ]] || die "cx-pgsql secret show <name>  (names: $(ls "$SECRETS_DIR" | tr '\n' ' '))"
+    cat "$(secret_path "$3")"
+    echo
+    ;;
+  *) usage; exit 1 ;;
+esac

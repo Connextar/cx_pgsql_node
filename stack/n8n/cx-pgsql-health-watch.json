@@ -1,0 +1,325 @@
+{
+  "name": "CX PGSQL health watch",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "84439d14-02d5-4898-94b5-cb41a53662c7",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "75b1b8bf-ec0f-4c38-9804-c500dc093e0e",
+              "name": "statusUrl",
+              "value": "https://db.example.com/status",
+              "type": "string"
+            },
+            {
+              "id": "59982214-aae4-4bdd-acc4-f2d06ca4d61e",
+              "name": "alertTo",
+              "value": "ops@example.com",
+              "type": "string"
+            },
+            {
+              "id": "550147b5-3653-4282-a1bc-3bb2f9ac2d3f",
+              "name": "alertFrom",
+              "value": "n8n@example.com",
+              "type": "string"
+            },
+            {
+              "id": "75190a46-d26f-4692-9719-d005ddd03b28",
+              "name": "serverName",
+              "value": "CX_PGSQL_Node_1",
+              "type": "string"
+            },
+            {
+              "id": "e25b8033-5058-4d93-ab56-024fae48571e",
+              "name": "reminderHours",
+              "value": 6,
+              "type": "number"
+            },
+            {
+              "id": "ca3761a7-8176-4b4f-8ef2-f1699e85679e",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b55d9a0d-a644-4f44-94af-25656a448385",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "Edit here: status URL, alert recipient and sender, server name, reminder interval, optional Slack/Discord incoming-webhook URL (leave empty for email only).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.statusUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "47f0d4c2-e00e-416a-b6d6-1d749df240ae",
+      "name": "GET /status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL",
+          "name": "CX PGSQL health token"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Header Auth credential \"CX PGSQL health token\": name Authorization, value \"Bearer <token>\". Non-2xx answers are passed on (never error); network errors are passed on as an error item."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decides whether to alert. The previous overall status lives in workflow static data, which n8n\n// saves only for production runs (workflow active, started by the schedule) — not for manual test runs.\nconst RANK = { ok: 0, warn: 1, fail: 2 };\nconst settings = $('Settings').first().json;\nconst res = $input.first().json;\nconst state = $getWorkflowStaticData('global');\nconst now = new Date();\nconst reminderMs = Number(settings.reminderHours || 6) * 3600 * 1000;\nconst server = settings.serverName || 'PostgreSQL';\n\n// What did /status say? A request error or a non-2xx answer is a fail.\nlet body = res.body;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch (e) { /* not JSON */ }\n}\nconst code = typeof res.statusCode === 'number' ? res.statusCode : null;\nlet current;\nlet problems;\nif (code !== null && code >= 200 && code < 300 && body && RANK[body.status] !== undefined) {\n  current = body.status;\n  problems = (Array.isArray(body.checks) ? body.checks : []).filter((c) => c && c.status !== 'ok');\n} else {\n  current = 'fail';\n  let why;\n  if (code !== null) {\n    const detail = body && typeof body === 'object' && body.error ? ` (${body.error})` : '';\n    why = `the status endpoint answered HTTP ${code}${detail}`;\n  } else {\n    const err = res.error;\n    const msg = (err && (err.message || err.description)) || (typeof err === 'string' ? err : '') || res.message || 'no response';\n    why = `request to the status endpoint failed: ${msg}`;\n  }\n  problems = [{ name: 'status_request', status: 'fail', message: why }];\n}\n\n// Alert on a change of overall state, and every reminderHours while it stays at fail.\nconst previous = RANK[state.lastStatus] !== undefined ? state.lastStatus : null;\nlet reason = null;\nif (previous === null) {\n  if (current !== 'ok') reason = 'first-check';\n} else if (previous !== current) {\n  reason = current === 'ok' ? 'recovered' : RANK[current] > RANK[previous] ? 'worse' : 'better';\n} else if (current === 'fail' && now.getTime() - new Date(state.lastAlertAt || 0).getTime() >= reminderMs) {\n  reason = 'reminder';\n}\n\nif (previous !== current) state.since = now.toISOString();\nstate.lastStatus = current;\nstate.lastCheckedAt = now.toISOString();\nif (reason) state.lastAlertAt = now.toISOString();\n\nconst up = (s) => String(s).toUpperCase();\nconst failing = problems.filter((p) => p.status === 'fail');\nconst warning = problems.filter((p) => p.status === 'warn');\nconst headline = {\n  'first-check': up(current),\n  worse: `${up(current)} (was ${previous ? up(previous) : '?'})`,\n  better: `improved to ${up(current)} (was ${previous ? up(previous) : '?'})`,\n  recovered: `RECOVERED (was ${previous ? up(previous) : '?'})`,\n  reminder: `still FAIL since ${state.since}`,\n}[reason] || up(current);\nconst counts = [failing.length ? `${failing.length} failing` : '', warning.length ? `${warning.length} warning` : ''].filter(Boolean).join(', ');\nconst subject = `[${server}] ${headline}${counts ? ` - ${counts}` : ''}`;\n\nconst lines = [\n  `${server} database health is ${up(current)}${previous && previous !== current ? ` (was ${up(previous)})` : ''}.`,\n  `Checked at ${now.toISOString()}; in this state since ${state.since}.`,\n  '',\n];\nconst list = (title, items) => {\n  if (!items.length) return;\n  lines.push(`${title}:`);\n  for (const p of items.slice(0, 40)) lines.push(`  - ${p.name}: ${String(p.message || '').slice(0, 500)}`);\n  lines.push('');\n};\nlist('Failing', failing);\nlist('Warnings', warning);\nif (!problems.length) lines.push('All checks are ok.', '');\nlines.push(`Details: ${settings.statusUrl} (needs the bearer token)`);\nif (reason === 'reminder' || current === 'fail') lines.push(`While this stays at FAIL a reminder is sent every ${Number(settings.reminderHours || 6)} h.`);\n\nconst text = lines.join('\\n');\nconst chatText = [`*${subject}*`, ...failing.map((p) => `FAIL ${p.name}: ${p.message}`), ...warning.map((p) => `WARN ${p.name}: ${p.message}`)].join('\\n');\n\nreturn [{ json: { alert: Boolean(reason), reason, current, previous, subject, text, chatText } }];\n"
+      },
+      "id": "14c6af85-2e5c-4919-9d41-a5db2c8f0015",
+      "name": "Evaluate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "04058ecf-ec4e-47d3-b104-3ae7c6ceb58a",
+              "leftValue": "={{ $json.alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1776341d-79c6-4141-9be1-ec3312c5ecf8",
+      "name": "Alert needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Settings').first().json.alertFrom }}",
+        "toEmail": "={{ $('Settings').first().json.alertTo }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "3be24cf8-3a0b-4ae6-adac-87546e5fe64c",
+      "name": "Send alert email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1100,
+        -100
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_SMTP_CREDENTIAL",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "5ee62067-b116-4900-8169-ce450d6220b4",
+              "leftValue": "={{ $('Settings').first().json.chatWebhookUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6868bd3d-c342-4e31-b772-eba66160594e",
+      "name": "Chat webhook set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Settings').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Settings').first().json.chatWebhookUrl.includes('discord') ? { content: $json.chatText.slice(0, 1900) } : { text: $json.chatText }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "ce565565-56c9-4e35-9867-8229d8c9e80e",
+      "name": "Post to chat webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        120
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Slack incoming webhooks take {\"text\"}; Discord webhooks take {\"content\"} (chosen by the URL)."
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "GET /status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET /status": {
+      "main": [
+        [
+          {
+            "node": "Evaluate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate": {
+      "main": [
+        [
+          {
+            "node": "Alert needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert needed?": {
+      "main": [
+        [
+          {
+            "node": "Send alert email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Chat webhook set?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Chat webhook set?": {
+      "main": [
+        [
+          {
+            "node": "Post to chat webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "pinData": {}
+}

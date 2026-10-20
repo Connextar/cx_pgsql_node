@@ -1,0 +1,18 @@
+{
+  "name": "cx-pgsql-health",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Health and monitoring HTTP service for the CX_PGSQL_Node_1 PostgreSQL stack",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}
