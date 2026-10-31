@@ -52,6 +52,10 @@ EOF
 
 _base_journald() { printf '[Journal]\nSystemMaxUse=%s\n' "$JOURNAL_MAX_USE"; }
 
+# Some cloud images run systemd-resolved with LLMNR answering on every interface (port 5355).
+_base_resolved() { printf '# Managed by CX_PGSQL_Node_1 setup: no LLMNR or mDNS on a server.\n[Resolve]\nLLMNR=no\nMulticastDNS=no\n'; }
+_base_no_llmnr() { ! ss -Hltn 'sport = :5355' | grep_q LISTEN; }
+
 _base_cloud_init() {
   printf '# Managed by CX_PGSQL_Node_1 setup: keep the hostname and /etc/hosts we set.\npreserve_hostname: true\nmanage_etc_hosts: false\n'
 }
@@ -90,6 +94,10 @@ base_check() {
   chk_render "sysctl settings" /etc/sysctl.d/90-cx.conf _base_sysctl
   chk "swappiness applied" test "$(cat /proc/sys/vm/swappiness)" = 10
   chk_render "journal capped at $JOURNAL_MAX_USE" /etc/systemd/journald.conf.d/90-cx.conf _base_journald
+  if unit_active systemd-resolved; then
+    chk_render "systemd-resolved: LLMNR and mDNS off" /etc/systemd/resolved.conf.d/90-cx.conf _base_resolved
+    chk "nothing listening on 5355 (LLMNR)" _base_no_llmnr
+  fi
   if ((SWAP_SIZE_MB > 0)); then chk "swap file of ${SWAP_SIZE_MB} MB" _base_swap_ok; fi
 }
 
@@ -136,6 +144,9 @@ base_apply() {
   if _base_journald | write_if_changed /etc/systemd/journald.conf.d/90-cx.conf; then
     systemctl restart systemd-journald || true
   fi
+  if unit_active systemd-resolved && _base_resolved | write_if_changed /etc/systemd/resolved.conf.d/90-cx.conf; then
+    systemctl restart systemd-resolved || true
+  fi
 
   if ((SWAP_SIZE_MB > 0)) && ! _base_swap_ok; then
     swapoff /swapfile 2>/dev/null || true
@@ -150,7 +161,7 @@ base_apply() {
 }
 
 base_teardown() {
-  rm -f /etc/sysctl.d/90-cx.conf /etc/systemd/journald.conf.d/90-cx.conf \
+  rm -f /etc/sysctl.d/90-cx.conf /etc/systemd/journald.conf.d/90-cx.conf /etc/systemd/resolved.conf.d/90-cx.conf \
     /etc/apt/apt.conf.d/52cx-unattended-upgrades /etc/cloud/cloud.cfg.d/99-cx-hostname.cfg
   if ((PURGE)) && grep -q '^/swapfile ' /etc/fstab; then
     swapoff /swapfile 2>/dev/null || true

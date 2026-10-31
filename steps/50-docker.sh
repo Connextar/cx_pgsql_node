@@ -53,7 +53,7 @@ docker_apply() {
   # Debian's own docker.io conflicts with docker-ce.
   local p
   for p in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    pkg_installed "$p" && run apt-get remove -y -qq "$p"
+    pkg_installed "$p" && run apt-get "${APT_LOCK_WAIT[@]}" remove -y -qq "$p"
   done
   ensure_pkgs "${DOCKER_PKGS[@]}"
   if _docker_daemon_json | write_if_changed /etc/docker/daemon.json; then
@@ -66,7 +66,7 @@ docker_apply() {
 docker_teardown() {
   if ((PURGE)); then
     warn "Removing Docker and ALL its images, containers and volumes."
-    apt-get purge -y -qq "${DOCKER_PKGS[@]}" || true
+    apt-get "${APT_LOCK_WAIT[@]}" purge -y -qq "${DOCKER_PKGS[@]}" || true
     rm -rf /var/lib/docker /var/lib/containerd "$DOCKER_LIST" "$DOCKER_KEYRING"
   else
     info "Docker left installed (use --purge to remove it with every image and volume)."

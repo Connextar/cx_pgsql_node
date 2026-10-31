@@ -90,7 +90,9 @@ cmd_apply() {
       info "$id: disabled in config — skipped"
       continue
     fi
-    if [[ $STEP_STATE == DONE && $FORCE == 0 ]]; then
+    # A step with warnings is re-applied too: a warning is something a re-run may fix
+    # (e.g. the certificate once DNS points here). Still warning afterwards is not a failure.
+    if [[ $STEP_STATE == DONE && $FORCE == 0 && ${CHECK_WARN:-0} == 0 ]]; then
       ok "$id: already done"
       continue
     fi

@@ -103,15 +103,24 @@ A browser window opens; sign in to the Dropbox account that should hold the back
 installed on the server (`/etc/cx-pgsql/rclone.conf`, root only), and backups go to
 `BACKUP_REMOTE_PATH` in that Dropbox.
 
-To limit the server to one folder rather than the whole Dropbox, create your own Dropbox app
-(dropbox.com/developers/apps → Scoped access → **App folder**; permissions `files.content.write`,
-`files.content.read`, `files.metadata.read`; redirect URI `http://localhost:53682/`), then:
+**rclone's own app gets the whole Dropbox.** Anyone who takes the server could read every file in
+it. To limit the server to one folder, create your own Dropbox app (the recommended set-up):
+
+1. dropbox.com/developers/apps → **Create app** → Scoped access → **App folder** → a name (the
+   folder becomes `Apps/<name>`).
+2. **Permissions** tab: tick `account_info.read`, `files.metadata.write`, `files.content.write`,
+   `files.content.read`, `sharing.write` (rclone asks for these when you sign in) → **Submit**.
+3. **Settings** tab: OAuth 2 Redirect URIs → add `http://localhost:53682/`.
+4. Then, with the app key from the Settings tab:
 
 ```bash
-bin/remote.sh dropbox-auth --client-id <app key> --client-secret <app secret>
+bin/remote.sh dropbox-auth --client-id <app key>
 ```
 
-Backups then live in `Apps/<app name>/<BACKUP_REMOTE_PATH>`.
+It asks for the app secret without echoing it (or reads `DROPBOX_CLIENT_SECRET`); the secret goes
+to the server on stdin, never on a command line. Backups then live in
+`Apps/<app name>/<BACKUP_REMOTE_PATH>`. If you switch from rclone's app, disconnect "rclone" under
+Dropbox → Settings → Connected apps so the old whole-Dropbox token stops working.
 
 ### Encryption keys
 

@@ -139,9 +139,11 @@ same_content() {
 
 # ─── Packages ──────────────────────────────────────────────────────────────────────
 _APT_UPDATED=0
+# Wait for the dpkg lock rather than fail: on a fresh server unattended-upgrades often holds it.
+APT_LOCK_WAIT=(-o DPkg::Lock::Timeout=600)
 apt_update_once() {
   if ((_APT_UPDATED == 0)); then
-    env DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG_FILE" 2>&1 || die "apt-get update failed (see $LOG_FILE)."
+    env DEBIAN_FRONTEND=noninteractive apt-get "${APT_LOCK_WAIT[@]}" update -qq >>"$LOG_FILE" 2>&1 || die "apt-get update failed (see $LOG_FILE)."
     _APT_UPDATED=1
   fi
 }
@@ -157,7 +159,7 @@ ensure_pkgs() {
   apt_update_once
   info "Installing: ${missing[*]}"
   # dpkg's progress goes to the log; it's shown only if the install fails.
-  if ! env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+  if ! env DEBIAN_FRONTEND=noninteractive apt-get "${APT_LOCK_WAIT[@]}" install -y -qq --no-install-recommends \
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${missing[@]}" >>"$LOG_FILE" 2>&1; then
     tail -30 "$LOG_FILE" >&2
     die "apt-get install failed: ${missing[*]}"

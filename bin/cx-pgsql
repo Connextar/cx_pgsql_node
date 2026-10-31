@@ -14,7 +14,7 @@
 #   cx-pgsql backup run                        logical + physical + upload (what the timers do)
 #   cx-pgsql backup logical|physical [auto|full|diff|incr]|upload|verify
 #   cx-pgsql backup status | list
-#   cx-pgsql backup dropbox-configure [--client-id ID --client-secret SECRET]   (token JSON on stdin)
+#   cx-pgsql backup dropbox-configure          (token JSON, or token + app id/secret JSON, on stdin)
 #
 #   cx-pgsql restore fetch [all|repo|dumps]    download backups from the remote
 #   cx-pgsql restore dump <db> [file|latest] [--into NAME | --replace --yes] [--identity KEY] [--no-owner]
@@ -115,7 +115,10 @@ cmd_db() {
         printf 'Direct:\n  postgresql://%s:%s@%s:%s/%s?sslmode=%s\n' "$DB_USER" "$pw" "$host" "$PG_DIRECT_PORT" "$DB_NAME" "$mode"
       fi
       ((show)) || info "Add --show-password to include the password."
-      [[ "$mode" == require ]] && warn "Self-signed certificate in use: sslmode=require (no verification) until Let's Encrypt issues one."
+      # An `if`, not `&&`: as the last command, a false test would make `db url` fail with a real certificate.
+      if [[ "$mode" == require ]]; then
+        warn "Self-signed certificate in use: sslmode=require (no verification) until Let's Encrypt issues one."
+      fi
       ;;
     rotate)
       local name=${1:?database}
@@ -133,7 +136,8 @@ cmd_db() {
       local name=${1:?database} src tables
       _db_find "$name"
       [[ -t 0 ]] && printf 'Source connection URL (input hidden; use the direct, non-pooled one): ' >&2
-      IFS= read -r -s src
+      # read fails at end of input when the URL has no trailing newline (printf '%s' | …); keep what it read.
+      IFS= read -r -s src || [[ -n "$src" ]]
       [[ -t 0 ]] && echo >&2
       [[ "$src" == postgres* ]] || die "Expected a postgresql:// URL on stdin."
       tables=$(pg_value "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" -d "$DB_NAME")
@@ -142,6 +146,16 @@ cmd_db() {
       fi
       if [[ "$tables" != 0 ]]; then
         pg_sql -d postgres <<<"DROP DATABASE $DB_NAME WITH (FORCE);"
+        # The step's own check logs in through PgBouncer while the database is gone, and PgBouncer then
+        # answers every login with that cached "does not exist" until it retries — which, with no pool
+        # kept warm, it never does. So: recreate, restart PgBouncer to forget it, and check again.
+        "$PROJECT_DIR/setup.sh" apply databases >/dev/null 2>&1 || true
+        docker restart "$PGBOUNCER_CONTAINER" >/dev/null
+        local i
+        for i in $(seq 30); do
+          [[ "$(docker inspect -f '{{.State.Health.Status}}' "$PGBOUNCER_CONTAINER" 2>/dev/null)" == healthy ]] && break
+          sleep 1
+        done
         "$PROJECT_DIR/setup.sh" apply databases >/dev/null
       fi
       info "Copying into $DB_NAME (objects owned by $DB_USER)"
@@ -196,18 +210,20 @@ cmd_backup() {
       fi
       ;;
     dropbox-configure)
-      local client_id="" client_secret="" token
-      while (($#)); do
-        case $1 in
-          --client-id) client_id=$2; shift ;;
-          --client-secret) client_secret=$2; shift ;;
-          *) die "Unknown option $1" ;;
-        esac
-        shift
-      done
+      local input client_id client_secret token
+      (($# == 0)) || die "dropbox-configure reads everything from stdin (bin/remote.sh dropbox-auth sends it)."
       ensure_pkgs rclone
-      token=$(cat)
-      jq -e '.access_token' >/dev/null <<<"$token" || die "Expected the token JSON from 'rclone authorize dropbox' on stdin."
+      # stdin: rclone's token JSON, or {"token": {...}, "client_id": "...", "client_secret": "..."}
+      # for your own Dropbox app — the secret never appears on a command line.
+      input=$(cat)
+      if jq -e '.token.access_token' >/dev/null 2>&1 <<<"$input"; then
+        token=$(jq -c '.token' <<<"$input")
+        client_id=$(jq -r '.client_id // ""' <<<"$input")
+        client_secret=$(jq -r '.client_secret // ""' <<<"$input")
+      else
+        jq -e '.access_token' >/dev/null 2>&1 <<<"$input" || die "Expected the token JSON from 'rclone authorize dropbox' on stdin."
+        token=$input client_id="" client_secret=""
+      fi
       install -d -m 0700 /etc/cx-pgsql
       (
         umask 077

@@ -11,9 +11,15 @@
 #   bin/remote.sh tunnel [local-port] [remote-port]
 #                                             forward localhost:<local> to the server's loopback
 #                                             (default: the direct Postgres port)
-#   bin/remote.sh dropbox-auth [--client-id ID --client-secret SECRET]
+#   bin/remote.sh point-vercel <db> <app dir> [environment]
+#                                             set the app's DATABASE_URL (pooled) and
+#                                             DATABASE_DIRECT_URL (session) in Vercel and its
+#                                             .env.local, without printing the password
+#   bin/remote.sh dropbox-auth [--client-id APP_KEY]
 #                                             authorise Dropbox in your browser (needs rclone
-#                                             here) and install the token on the server
+#                                             here) and install the token on the server; with
+#                                             your own app, asks for its secret (or reads
+#                                             DROPBOX_CLIENT_SECRET)
 #
 # First run on a fresh VPS: connects as BOOTSTRAP_SSH_USER (root) on port 22 with your key;
 # afterwards as ADMIN_USER on SSH_PORT. Settings come from config/server.env.
@@ -41,6 +47,7 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
 [[ -n "${REMOTE_SSH_IDENTITY:-}" ]] && SSH_OPTS+=(-i "$REMOTE_SSH_IDENTITY" -o IdentitiesOnly=yes)
 
 say() { printf '› %s\n' "$*"; }
+ok() { printf '✓ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 # Pick the way in: the hardened one if it works, else the bootstrap one.
@@ -76,9 +83,15 @@ remote_setup() { rssh_t "$SUDO $INSTALL_DIR/setup.sh $*"; }
 confirm_from_new_connection() {
   local new=(ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" "$ADMIN_USER@$HOST")
   local old=(ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$BOOTSTRAP_SSH_PORT" "$BOOTSTRAP_SSH_USER@$HOST")
-  local probe="test -s /run/cx-pgsql/rollback-pending" rc=0
+  local probe="test -s /run/cx-pgsql/rollback-pending" rc=0 _
   # ssh exits 255 when it can't connect; otherwise with the command's status (1 = nothing pending).
-  "${new[@]}" "$probe" 2>/dev/null || rc=$?
+  # Retried: OpenSSH 10 refuses an address for a few seconds after a stalled connection from it.
+  for _ in 1 2 3 4; do
+    rc=0
+    "${new[@]}" "$probe" 2>/dev/null || rc=$?
+    ((rc == 255)) || break
+    sleep 8
+  done
   if ((rc == 1)); then return 0; fi
   if ((rc != 0)); then
     rc=0
@@ -91,7 +104,6 @@ confirm_from_new_connection() {
     say "Changes are pending, but $ADMIN_USER@$HOST:$SSH_PORT doesn't answer yet — retrying"
   fi
   say "Confirming SSH/firewall changes from a new connection ($ADMIN_USER@$HOST:$SSH_PORT)"
-  local _
   for _ in 1 2 3 4 5; do
     if "${new[@]}" "sudo $INSTALL_DIR/setup.sh confirm"; then
       return 0
@@ -115,24 +127,94 @@ cmd_apply() {
   remote_setup status || true
 }
 
+# rclone authorize prints the token JSON on one line between "Paste the following
+# into your remote machine --->" and "<---End paste"; some versions print a base64
+# blob there instead, whose JSON holds the token as a string under "token".
+dropbox_token_from() {
+  local out=$1 line blob
+  line=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*\{.*"access_token".*\}[[:space:]]*$' | tail -1 || true)
+  if [[ -n "$line" ]]; then
+    printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+    return 0
+  fi
+  blob=$(printf '%s\n' "$out" | grep -E '^[A-Za-z0-9+/_=-]{40,}$' | tail -1 || true)
+  [[ -n "$blob" ]] || return 0
+  printf '%s' "$blob" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '.token // empty' 2>/dev/null || true
+}
+
 cmd_dropbox_auth() {
   command -v rclone >/dev/null || die "rclone isn't installed here: brew install rclone"
-  local args=(dropbox) client_args=() out token
+  local client_id="" client_secret=${DROPBOX_CLIENT_SECRET:-} out token
   while (($#)); do
     case $1 in
-      --client-id) args+=("$2"); client_args+=(--client-id "$2"); shift ;;
-      --client-secret) args+=("$2"); client_args+=(--client-secret "$2"); shift ;;
+      --client-id) client_id=$2; shift ;;
+      --client-secret) die "Don't pass the app secret as an argument (it lands in shell history): you'll be asked for it." ;;
       *) die "Unknown option $1" ;;
     esac
     shift
   done
+  if [[ -n "$client_id" && -z "$client_secret" ]]; then
+    read -rsp "App secret for Dropbox app $client_id (not shown): " client_secret </dev/tty
+    echo
+    [[ -n "$client_secret" ]] || die "No app secret given."
+  fi
   say "A browser window opens: sign in to the Dropbox account that should hold the backups."
-  out=$(rclone authorize "${args[@]}")
-  token=$(printf '%s\n' "$out" | sed -n '/^{/,/^}/p' | tr -d '\n')
-  [[ -n "$token" ]] || token=$(printf '%s\n' "$out" | grep -E '^\{.*access_token' | tail -1)
+  if [[ -n "$client_id" ]]; then
+    out=$(rclone authorize dropbox "$client_id" "$client_secret")
+  else
+    out=$(rclone authorize dropbox)
+  fi
+  token=$(dropbox_token_from "$out")
   [[ -n "$token" ]] || die "No token in rclone's output."
+  jq -e '.access_token' >/dev/null <<<"$token" 2>&1 || die "rclone's output held no readable token JSON."
   pick_target
-  printf '%s' "$token" | rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql backup dropbox-configure ${client_args[*]}"
+  # The app secret travels with the token on stdin, never on the server's command line.
+  jq -cn --argjson token "$token" --arg id "$client_id" --arg secret "$client_secret" \
+    '{token: $token, client_id: $id, client_secret: $secret}' |
+    rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql backup dropbox-configure"
+}
+
+# Point a Vercel app, and its .env.local, at one of this server's databases. The URLs carry the
+# password, so they go from the server into Vercel's stdin and the file without being printed.
+cmd_point_vercel() {
+  local usage="usage: bin/remote.sh point-vercel <db> <app dir> [vercel environment]"
+  local db=${1:?$usage} app=${2:?$usage} target=${3:-production} out pooled session stamp saved
+  command -v vercel >/dev/null || die "The Vercel CLI isn't installed here."
+  app=$(cd "$app" && pwd)
+  [[ -f "$app/.vercel/project.json" ]] || die "$app isn't linked to a Vercel project (run vercel link there)."
+  pick_target
+  out=$(rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql db url $db --show-password" | tr -d '\r')
+  pooled=$(printf '%s\n' "$out" | sed -n '/^Pooled/{n;s/^ *//;p;}')
+  session=$(printf '%s\n' "$out" | sed -n '/^Session/{n;s/^ *//;p;}')
+  [[ $pooled == postgresql://* && $session == postgresql://* && $pooled != *'<password>'* ]] ||
+    die "Couldn't read $db's pooled and session URLs from the server (is PgBouncer on for it?)."
+
+  # Vercel never hands back a Secret's value, so the rollback copy is .env.local's lines.
+  stamp=$(date +%Y%m%d-%H%M%S)
+  if [[ -f "$app/.env.local" ]]; then
+    saved="$app/.env.before-$db-$stamp.local" # matches .env*.local, so git ignores it
+    (umask 077; grep -E '^DATABASE(_DIRECT)?_URL=' "$app/.env.local" >"$saved" || true)
+    say "Saved .env.local's previous DATABASE_URL / DATABASE_DIRECT_URL to ${saved##*/}"
+  fi
+
+  printf '%s' "$pooled" | vercel env add DATABASE_URL "$target" --force --sensitive --yes --cwd "$app" >/dev/null
+  ok "Vercel $target: DATABASE_URL → $db through PgBouncer (transaction pooling)"
+  printf '%s' "$session" | vercel env add DATABASE_DIRECT_URL "$target" --force --sensitive --yes --cwd "$app" >/dev/null
+  ok "Vercel $target: DATABASE_DIRECT_URL → $db session pool (migrations)"
+
+  if [[ -f "$app/.env.local" ]]; then
+    (
+      umask 077
+      CX_POOLED=$pooled CX_SESSION=$session awk '
+        /^DATABASE_URL=/        { print "DATABASE_URL=\"" ENVIRON["CX_POOLED"] "\""; next }
+        /^DATABASE_DIRECT_URL=/ { print "DATABASE_DIRECT_URL=\"" ENVIRON["CX_SESSION"] "\""; next }
+        { print }
+      ' "$app/.env.local" >"$app/.env.local.cx-new"
+    )
+    mv "$app/.env.local.cx-new" "$app/.env.local"
+    ok ".env.local now points at $db on $HOST"
+  fi
+  say "Takes effect on the app's next deployment."
 }
 
 CMD=${1:-status}
@@ -152,6 +234,7 @@ case $CMD in
     ssh "${SSH_OPTS[@]}" -N -L "$lp:127.0.0.1:$rp" -p "$T_PORT" "$T_USER@$HOST"
     ;;
   dropbox-auth) cmd_dropbox_auth "$@" ;;
+  point-vercel) cmd_point_vercel "$@" ;;
   -h | --help | help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) die "Unknown command $CMD (see bin/remote.sh --help)" ;;
 esac
