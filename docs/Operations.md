@@ -77,7 +77,9 @@ a database by itself; `cx-pgsql db list` flags any that are no longer in config.
    Redeploy, then check the app and `npx prisma migrate status` against the new URL.
 5. Keep the Neon project for a week as a fallback, then delete it.
 
-Vercel functions in `lhr1` (AWS London) are closest to a London VPS: every query is a round trip.
+Vercel functions in `lhr1` (AWS London) are closest to a London VPS: every query is a round trip —
+measured at 2.63 ms from `lhr1` (Neon: 0.98 ms). Figures, method and how to re-measure:
+[Performance.md](Performance.md).
 
 ## Backups
 
