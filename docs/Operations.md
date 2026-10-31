@@ -58,6 +58,40 @@ prints three connection strings:
 delete it). **Remove one:** delete its file and run `cx-pgsql db drop <name> --yes`. The setup never drops
 a database by itself; `cx-pgsql db list` flags any that are no longer in config.
 
+## Object storage
+
+Off unless `ENABLE_OBJECTS=true` ([ObjectStorage.md](ObjectStorage.md) says why and how). Garage runs
+beside the stack as its own compose project in `$STACK_DIR/objects`, data in `OBJECTS_DATA_DIR`.
+
+**Switching it on** for the first time: the steps are in [ObjectStorage.md §7](ObjectStorage.md#7-switching-it-on-the-real-server-when-you-say-so).
+Preview any change with `bin/remote.sh sync` and then `bin/remote.sh status`. A plain `status` runs
+the code already on the server.
+
+**Add an app:** create `config/objects/<app>.env` (copy `example.env.sample`) with its buckets, point
+`OBJECTS_FQDN`'s A record here, then `bin/remote.sh apply`. That creates the buckets, one access key for
+the app with read and write on those buckets only (never owner), the TLS certificate and the nginx site,
+and checks a signed request through `https://<OBJECTS_FQDN>`.
+
+```bash
+bin/remote.sh cx objects key <app> --show-secret    # OBJECTS_ENDPOINT, _REGION, _ACCESS_KEY_ID, _SECRET_ACCESS_KEY
+bin/remote.sh cx objects list                       # buckets (objects, size, app), keys; flags anything not in config
+bin/remote.sh cx objects status                     # Garage's nodes, layout and health
+```
+
+- Clients use **path-style** addressing, region `garage`. No bucket is public and none has website access:
+  every request carries a signature from a key.
+- **Change a key:** `cx-pgsql objects key <app> rotate` makes a new one; the old one keeps working until
+  `cx-pgsql objects key <app> drop-previous`, so the app can be redeployed in between.
+- **Remove an app:** delete its file. Buckets are never deleted by the setup; `objects list` shows them as
+  "not in config". Empty and delete them deliberately (with the app's key, or Garage's CLI:
+  `docker exec cx-pgsql-objects /garage bucket delete --yes <bucket>`).
+- **Capacity** (`OBJECTS_CAPACITY`) is what Garage plans to use, not a quota. Health warns at 50 % and fails
+  at 90 % (`objects_capacity`); that's when to add disk or move the buckets elsewhere.
+- **Upgrading Garage:** take `cx-pgsql backup objects` first, then change `OBJECTS_IMAGE` and apply. Read the
+  release notes: since v2.5.0 a node **can't go back** to an older version once upgraded.
+- fail2ban on the S3 endpoint is **off** by default (`OBJECTS_FAIL2BAN`): a ban drops all traffic from
+  the address, and Vercel's functions share theirs, so a misconfigured app would lose its database too.
+
 ## Moving AltEd off Neon
 
 1. `config/databases/alted.env` with `DB_NAME=alted` (plus any extensions the schema uses), then
@@ -88,10 +122,11 @@ measured at 2.63 ms from `lhr1` (Neon: 0.98 ms). Figures, method and how to re-m
 | `cx-backup-logical` | 02:00 daily | `pg_dump` every database (encrypted with age if `BACKUP_AGE_RECIPIENTS` is set), checks it reads back, prunes (7 daily / 4 weekly / 6 monthly) |
 | `cx-backup-physical` | 03:00 daily | pgBackRest: full if the last is ≥ 7 days old, else differential; WAL is archived continuously |
 | `cx-backup-upload` | :20 hourly | Mirrors the (encrypted) pgBackRest repository and copies encrypted dumps and secrets to the remote; remote dumps pruned 14 / 8 / 12 |
-| `cx-backup-verify` | Sunday 05:00 | Checksums every dump, restores a fresh dump of each database into a scratch database, restores the newest base backup into a throwaway container |
+| `cx-backup-objects` | :35 hourly | Only with `ENABLE_OBJECTS`. Measures the buckets (for health), then `rclone sync`s every backed-up bucket to an rclone **crypt** remote at `BACKUP_REMOTE_PATH/objects`; deleted objects move to `deleted/<date>/` there, kept `OBJECTS_BACKUP_KEEP_DELETED_DAYS` |
+| `cx-backup-verify` | Sunday 05:00 | Checksums every dump, restores a fresh dump of each database into a scratch database, restores the newest base backup into a throwaway container; with objects, compares every object older than 2 h with its encrypted copy and restores a sample (`OBJECTS_VERIFY_SAMPLE`) into the `cx-verify` bucket to compare byte for byte, and reads a sample of `deleted/` back in full |
 
-Run any of them now: `cx-pgsql backup logical|physical|upload|verify`, or `cx-pgsql backup run`
-(dump + base backup + upload). Timer state: `systemctl list-timers 'cx-backup-*'`.
+Run any of them now: `cx-pgsql backup logical|physical|upload|objects|verify`, or `cx-pgsql backup run`
+(dump + base backup + upload, and objects when on). Timer state: `systemctl list-timers 'cx-backup-*'`.
 
 ### Dropbox
 
@@ -131,6 +166,9 @@ Dropbox → Settings → Connected apps so the old whole-Dropbox token stops wor
   `BACKUP_AGE_RECIPIENTS`, and keep the private key in your password manager, not on the server.
 - The pgBackRest repository is encrypted with the secret `pgbackrest-cipher-pass`. It is also inside
   the encrypted secrets bundle; keep a second copy: `cx-pgsql secret show pgbackrest-cipher-pass`.
+- The objects' copy is encrypted by rclone crypt with the secrets `objects-crypt-pass` and
+  `objects-crypt-salt`. They are in the secrets bundle too; keep a second copy of both
+  (`cx-pgsql secret show objects-crypt-pass`, `… objects-crypt-salt`). Without them the copy can't be read.
 
 Without an age recipient, dumps stay on the server and only the pgBackRest repository uploads.
 
@@ -170,7 +208,9 @@ with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTAR
 
 Generated on the server under `/etc/cx-pgsql/secrets/` (root only) and never overwritten:
 `postgres-password`, `cx-monitor-password`, `pgbouncer-auth-password`, `health-token`,
-`pgbackrest-cipher-pass`, `db-<user>-password`, and n8n's. Read one with
+`pgbackrest-cipher-pass`, `db-<user>-password`, n8n's, and with objects: `objects-rpc-secret`,
+`objects-admin-token`, `objects-metrics-token`, `objects-crypt-pass`, `objects-crypt-salt` and each key's
+`objects-key-<name>-id` / `-secret`. Read one with
 `cx-pgsql secret show <name>`. They are uploaded only inside the age-encrypted bundle.
 
 ## Tearing down

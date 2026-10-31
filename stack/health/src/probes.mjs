@@ -364,6 +364,20 @@ export async function probeHost(dataDir) {
   return out;
 }
 
+const OBJECTS_TIMEOUT_MS = 5_000;
+
+/** Asks the object store (Garage's /health) how it is. Returns { url, http_status, response_ms } or { url, error }. */
+export async function probeObjects(url) {
+  const started = performance.now();
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(OBJECTS_TIMEOUT_MS), redirect: 'manual' });
+    await res.arrayBuffer().catch(() => {});
+    return { url, http_status: res.status, response_ms: Math.round((performance.now() - started) * 10) / 10 };
+  } catch (err) {
+    return { url, error: err?.name === 'TimeoutError' ? `no answer within ${OBJECTS_TIMEOUT_MS} ms` : errorMessage(err) };
+  }
+}
+
 /** Reads the backup status file. Returns { path, present, data?, error?, mtime? }; never throws. */
 export async function readBackupStatus(path) {
   const result = await readStatusFile(path);

@@ -73,6 +73,10 @@ or an unreadable `*_FILE` stop the service at start-up with a message listing ev
 | `CERT_WARN_DAYS` | `14` | Certificate check warns with this many days (or fewer) left. |
 | `CERT_FAIL_DAYS` | `3` | …and fails with this many days (or fewer) left. |
 | `MIN_CACHE_HIT_PCT` | `90` | Cache-hit check warns below this % (it never fails). |
+| `OBJECTS_HEALTH_URL` | *(empty)* | The object store's health endpoint (Garage's admin API `/health`, e.g. `http://cx-pgsql-objects:3903/health`). Empty switches the `objects`, `objects_capacity` and `backup_objects` checks off. |
+| `OBJECTS_BACKUP_MAX_AGE_HOURS` | `3` | Maximum age of the last successful off-site object copy (it runs hourly). |
+| `WARN_OBJECTS_CAPACITY_PCT` | `50` | `objects_capacity` warns at this % of the store's capacity… |
+| `FAIL_OBJECTS_CAPACITY_PCT` | `90` | …and fails at this %. |
 | `CACHE_SECONDS` | `15` | Compute the report at most this often (`0` = on every request, still single-flight). |
 | `STATUS_INCLUDE_QUERY_TEXT` | `false` | `true` adds running-query text (200 chars, string literals masked) to `/status`. |
 
@@ -98,7 +102,10 @@ The process never crashes because PostgreSQL or PgBouncer is down.
 | `backup_logical` | From the status file `logical` section (`BACKUP_MAX_AGE_HOURS`); also fail if any database entry has `verified: false`. | hours since success |
 | `backup_physical` | `physical` section (pgBackRest, `BACKUP_MAX_AGE_HOURS`); ok with a note when `enabled: false`. | hours since success |
 | `backup_upload` | Only when `upload.enabled` is `true` (`UPLOAD_MAX_AGE_HOURS`). | hours since success |
-| `backup_verify` | `verify` section (`VERIFY_MAX_AGE_HOURS`); also fail if any database entry has `ok: false`. | hours since success |
+| `backup_verify` | `verify` section (`VERIFY_MAX_AGE_HOURS`); also fail if any database entry, or any bucket under `verify.objects`, has `ok: false`. | hours since success |
+| `objects` | Only with `OBJECTS_HEALTH_URL`. fail unless Garage's `/health` answers 200 within 5 s (503 means the layout isn't applied or a partition is unavailable). | response ms |
+| `objects_capacity` | Only with `OBJECTS_HEALTH_URL`. `objects.bytes` ÷ `objects.capacity_bytes` from the status file (written by every objects backup run): warn ≥ `WARN_OBJECTS_CAPACITY_PCT`, fail ≥ `FAIL_OBJECTS_CAPACITY_PCT`; warn when nothing has been measured yet. | % used |
+| `backup_objects` | Only with `OBJECTS_HEALTH_URL`. `objects_backup` section (`OBJECTS_BACKUP_MAX_AGE_HOURS`); warn when `enabled: false` (no off-site copy at all). | hours since success |
 | `status_file` | warn when the status file is missing, unreadable, larger than 1 MB or not a JSON object. | hours since `updated` |
 | `tls_cert` | warn ≤ `CERT_WARN_DAYS` left, fail ≤ `CERT_FAIL_DAYS`, expired, not yet valid or unreadable. | days left |
 | `cache_hit` | warn when a database with at least 10,000 block reads+hits has a shared-buffer hit ratio below `MIN_CACHE_HIT_PCT`. Never fails. | lowest % |
@@ -262,7 +269,9 @@ Metrics are left out (not reported as 0) when their source is unavailable.
 | `cx_host_disk_used_ratio`, `cx_host_disk_total_bytes`, `cx_host_disk_free_bytes` | `path` | data-directory filesystem |
 | `cx_host_load1`, `cx_host_load5`, `cx_host_load15`, `cx_host_cpu_count` | | |
 | `cx_host_memory_available_bytes`, `cx_host_memory_total_bytes` | | |
-| `cx_backup_age_seconds` | `kind` = `logical`, `physical`, `upload`, `verify` | since the last success |
+| `cx_backup_age_seconds` | `kind` = `logical`, `physical`, `upload`, `verify` (and `objects` with an object store) | since the last success |
+| `cx_objects_up` | | 1 when the object store's health check answered 200 |
+| `cx_objects_bytes`, `cx_objects_count`, `cx_objects_capacity_bytes` | | from the last measurement in the status file |
 | `cx_backup_status_file_age_seconds` | | since `updated` |
 | `cx_tls_cert_days_left` | | |
 | `cx_pgbouncer_pool_cl_active`, `_cl_waiting`, `_sv_active`, `_sv_idle`, `_maxwait_seconds` | `database`, `user` | per pool |

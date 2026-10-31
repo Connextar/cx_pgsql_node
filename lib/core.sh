@@ -94,6 +94,9 @@ derive_config() {
   export DUMPS_DIR="$BACKUP_ROOT/dumps"
   export REPO_DIR="$BACKUP_ROOT/pgbackrest"
   export PITR_CONTAINER="${STACK_NAME}-pitr"
+  # Object storage (steps/72-objects.sh, lib/objects.sh).
+  export OBJECTS_DIR="$STACK_DIR/objects"
+  export OBJECTS_CONTAINER="${STACK_NAME}-objects"
 }
 
 is_true() { [[ "${1,,}" =~ ^(1|true|yes|on)$ ]]; }
@@ -181,6 +184,17 @@ secret() {
   cat "$path"
 }
 secret_exists() { [[ -s "$(secret_path "$1")" ]]; }
+# The same, as hex (what Garage's RPC secret and access keys must be): secret_hex <name> <bytes> [prefix]
+secret_hex() {
+  local name=$1 bytes=$2 prefix=${3:-} path
+  path=$(secret_path "$name")
+  if [[ ! -s "$path" ]]; then
+    install -d -m 0700 "$SECRETS_DIR"
+    (umask 077 && printf '%s%s' "$prefix" "$(openssl rand -hex "$bytes")" >"$path")
+    _log "SECRET generated $name"
+  fi
+  cat "$path"
+}
 
 # ─── Services ──────────────────────────────────────────────────────────────────────
 unit_active() { systemctl is-active --quiet "$1"; }

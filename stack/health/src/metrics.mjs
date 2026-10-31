@@ -134,11 +134,21 @@ export function renderMetrics(report) {
 
   const ages = report.backups?.ages;
   if (ages) {
-    for (const kind of ['logical', 'physical', 'upload', 'verify']) {
+    for (const kind of ['logical', 'physical', 'upload', 'verify', ...(report.objects?.enabled ? ['objects'] : [])]) {
       const hours = ages[kind]?.last_success_hours;
       m.add('cx_backup_age_seconds', gauge, 'Seconds since the last successful backup step, from the status file.', { kind }, hours == null ? null : Math.round(hours * 3600));
     }
     m.add('cx_backup_status_file_age_seconds', gauge, 'Seconds since the status file "updated" timestamp.', {}, ages.updated_hours == null ? null : Math.round(ages.updated_hours * 3600));
+  }
+
+  const o = report.objects;
+  if (o?.enabled) {
+    m.add('cx_objects_up', gauge, 'The object store answered its health check with 200.', {}, o.http_status === 200 ? 1 : 0);
+    if (o.store && typeof o.store === 'object') {
+      m.add('cx_objects_bytes', gauge, 'Bytes held in the object store, from the last measurement.', {}, num(o.store.bytes));
+      m.add('cx_objects_capacity_bytes', gauge, 'Capacity the object store may use.', {}, num(o.store.capacity_bytes));
+      m.add('cx_objects_count', gauge, 'Objects held in the object store, from the last measurement.', {}, num(o.store.objects));
+    }
   }
 
   if (report.tls && report.tls.days_left != null) m.add('cx_tls_cert_days_left', gauge, 'Days until the certificate expires.', {}, report.tls.days_left);

@@ -18,7 +18,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PROJECT_DIR
 # shellcheck source=lib/core.sh
 source "$PROJECT_DIR/lib/core.sh"
-for _lib in tls dbconf pg backup; do
+for _lib in tls dbconf pg backup objects; do
   # shellcheck source=/dev/null
   source "$PROJECT_DIR/lib/$_lib.sh"
 done

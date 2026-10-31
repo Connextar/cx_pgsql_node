@@ -18,7 +18,9 @@ test('defaults match the documented values', () => {
     warnConnPct: 70, failConnPct: 90, warnDiskPct: 80, failDiskPct: 90, longQuerySeconds: 60, warnBlockedSeconds: 30,
     backupMaxAgeHours: 26, uploadMaxAgeHours: 26, verifyMaxAgeHours: 192, walArchiveMaxAgeMinutes: 30,
     certWarnDays: 14, certFailDays: 3, minCacheHitPct: 90,
+    objectsBackupMaxAgeHours: 3, warnObjectsCapacityPct: 50, failObjectsCapacityPct: 90,
   });
+  assert.deepEqual(cfg.objects, { healthUrl: '' });
   assert.equal(cfg.cacheSeconds, 15);
   assert.equal(cfg.includeQueryText, false);
 });

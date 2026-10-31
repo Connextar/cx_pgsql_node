@@ -2,7 +2,7 @@
 import http from 'node:http';
 import { ConfigError, describeConfig, loadConfig } from './src/config.mjs';
 import { CONTENT_TYPE as METRICS_TYPE, renderMetrics } from './src/metrics.mjs';
-import { PG_SECTIONS, createPools, probeHost, probePgbouncer, probePostgres, readBackupStatus, readCertificate } from './src/probes.mjs';
+import { PG_SECTIONS, createPools, probeHost, probeObjects, probePgbouncer, probePostgres, readBackupStatus, readCertificate } from './src/probes.mjs';
 import { buildReport, healthzView, makeCheck } from './src/report.mjs';
 import { ProbeErrorLog, bearerToken, errorMessage, log, tokensEqual } from './src/util.mjs';
 
@@ -33,12 +33,13 @@ let previous = {}; // carried between reports (archiver failed_count)
 async function computeReport() {
   const started = Date.now();
   try {
-    const [postgres, pgbouncer, host, backups, cert] = await Promise.all([
+    const [postgres, pgbouncer, host, backups, cert, objects] = await Promise.all([
       probePostgres(pools.postgres, cfg),
       cfg.pgbouncer.enabled ? probePgbouncer(pools, cfg) : null,
       probeHost(cfg.dataDir),
       readBackupStatus(cfg.backupStatusFile),
       cfg.certFile ? readCertificate(cfg.certFile) : null,
+      cfg.objects.healthUrl ? probeObjects(cfg.objects.healthUrl) : null,
     ]);
 
     const errors = { postgres: postgres.connected ? null : postgres.error };
@@ -50,9 +51,10 @@ async function computeReport() {
     errors.disk = host.errors.disk ?? null;
     errors.backup_status_file = backups.error ? `${cfg.backupStatusFile}: ${backups.error}` : null;
     if (cert) errors.certificate = cert.error ? `${cfg.certFile}: ${cert.error}` : null;
+    if (objects) errors.objects = objects.error ? `${objects.url}: ${objects.error}` : null;
     probeErrors.update(errors);
 
-    const report = buildReport({ postgres, pgbouncer, host, backups, cert }, cfg, new Date(), previous);
+    const report = buildReport({ postgres, pgbouncer, host, backups, cert, objects }, cfg, new Date(), previous);
     const failedCount = report.wal?.archiver?.failed_count;
     if (typeof failedCount === 'number') previous = { ...previous, archiverFailedCount: failedCount };
     return { status: report.status, time: report.time, generated_in_ms: Date.now() - started, ...report };

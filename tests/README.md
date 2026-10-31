@@ -62,3 +62,53 @@ kernel-wide settings (`vm.swappiness`, `kernel.kptr_restrict`, `kernel.dmesg_res
 VM until Docker restarts. Put them back with
 `docker run --rm --privileged alpine sysctl -w vm.swappiness=60 kernel.kptr_restrict=0` (your values
 may differ: read them first with `sysctl`).
+
+## Object storage (2026-10-31)
+
+`steps/72-objects.sh` (Garage v2.5.0) on Debian 13, with the test config plus `ENABLE_OBJECTS=true`,
+`OBJECTS_FQDN=s3-test.example.invalid`, `OBJECTS_CAPACITY=5G` and two apps in `config/objects/`
+(`alted`: `alted-uploads alted-listing`; `other`: `other-files`). The stand-in Dropbox is
+`[dropbox] type = local`, as above. `tests/objects-test.sh` holds the checks; run it on a fresh VPS
+after the apply: `tests/vps.sh exec bash -s < tests/objects-test.sh`.
+
+- **Final run:** fresh VPS → `remote.sh apply` (exit 0) → `status` all DONE (warnings: the
+  self-signed certificates and, before the script sets it up, the Dropbox remote) → **68 of 68 checks
+  passed**:
+  - **Keys, through nginx with real signatures:**
+    - Each app reads and writes only its own buckets. It can't create a bucket, delete its own
+      bucket or set a lifecycle (not owner).
+    - The backup key reads every bucket and writes none.
+    - An unsigned request is refused, the admin API isn't reachable through nginx, and its port is
+      on loopback only.
+  - **Off-site copy:** names and contents encrypted (no plain key, bucket name or bytes in the
+    folder). A deleted object lands in `deleted/<date>/`.
+  - **Verify:**
+    - Passes as normal, with the scratch bucket left empty.
+    - Fails on a tampered `live/` copy and on a tampered `deleted/` copy, and health's
+      `backup_verify` fails with it.
+    - Passes again once the copy is repaired, even with a changed timestamp.
+  - **Restore:** one object, one deleted object, `--all` after `teardown objects --purge`; all byte
+    for byte. The backup key loses write again afterwards. An unknown bucket is refused.
+  - **Keys rotate:** old and new both work until `drop-previous`; `key` hides the secret.
+  - **Drift:** Garage stopped, an extra grant added, `garage.toml` edited → BROKEN, and `apply`
+    repairs each. Health's `objects` fails while Garage is down.
+  - **Isolation:** `apply stack --force` doesn't restart Garage, and tearing objects down leaves the
+    database stack running.
+- **Upgrade path, as the real server would take it** (fresh VPS): the committed version (`0c95a64`)
+  → this version with `ENABLE_OBJECTS=false` → `true`.
+  - With objects off, only the **health container was recreated**. Postgres and PgBouncer kept
+    running, and nginx, fail2ban and the firewall were unchanged.
+  - With objects on: the nginx site, the certificate placeholder, Garage, the buckets and keys and
+    the timer were added, and health was recreated again. Postgres and PgBouncer were still not
+    restarted. Every step was DONE.
+  - `remote.sh status` runs the server's installed code: preview with `remote.sh sync` first.
+- **Found and fixed on the way:**
+  - Garage's compose project was being named by the exported `COMPOSE_PROJECT_NAME` (the stack's),
+    so either side's `--remove-orphans` would have removed the other. Fixed with `-p`, and checked
+    by the step.
+  - A `local IFS` in the check leaked into the rest of it.
+  - Restoring an empty bucket failed.
+  - Verify's age filter also applied to the copy's timestamps.
+  - A restore left `live/` behind until the next hourly copy, which made verify fail. A restore
+    now refreshes the copy.
+  - The `deleted/` archive wasn't checked at all. A sample is now read back in full.

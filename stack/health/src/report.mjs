@@ -171,7 +171,10 @@ export function evaluateBackups(file, thresholds, now) {
 
   let verify = evaluateBackupSection('backup_verify', 'restore verification', data.verify, t.verifyMaxAgeHours, now);
   if (verify.status !== 'fail') {
-    const bad = databasesWhere(data.verify?.databases, (d) => d.ok === false);
+    const bad = [
+      ...databasesWhere(data.verify?.databases, (d) => d.ok === false),
+      ...databasesWhere(data.verify?.objects, (d) => d.ok === false).map((b) => (b === 'deleted/' ? 'deleted objects' : `bucket ${b}`)),
+    ];
     if (bad.length) verify = makeCheck('backup_verify', 'fail', `restore verification failed for: ${bad.join(', ')}`, verify.value);
   }
   checks.push(verify);
@@ -191,8 +194,60 @@ export function evaluateBackups(file, thresholds, now) {
     physical: sectionAges(data.physical, now, ['last_full']),
     upload: sectionAges(data.upload, now),
     verify: sectionAges(data.verify, now),
+    objects: sectionAges(data.objects_backup, now),
   };
   return { checks, section };
+}
+
+// ---------------------------------------------------------------- object store
+
+/**
+ * The object store: is Garage healthy, how full is it, and is its off-site copy recent.
+ * @param probe      { url, http_status?, response_ms?, error? } from probeObjects
+ * @param statusData the parsed backup status file (or undefined): `objects` (sizes, written by every
+ *                   objects backup run) and `objects_backup` (the off-site copy)
+ */
+export function evaluateObjects(probe, statusData, t, now) {
+  const checks = [];
+  if (probe.error) {
+    checks.push(makeCheck('objects', 'fail', `cannot reach the object store at ${probe.url}: ${errorText(probe.error)}`));
+  } else if (probe.http_status === 200) {
+    checks.push(makeCheck('objects', 'ok', `object store healthy, answered in ${probe.response_ms} ms`, probe.response_ms));
+  } else {
+    checks.push(makeCheck('objects', 'fail', `object store reports unhealthy (HTTP ${probe.http_status})`));
+  }
+
+  const store = statusData?.objects;
+  const capacity = num(store?.capacity_bytes);
+  const bytes = num(store?.bytes);
+  if (!store || typeof store !== 'object' || capacity === null || bytes === null || capacity <= 0) {
+    checks.push(makeCheck('objects_capacity', 'warn', 'no measurement of the object store yet (cx-pgsql backup objects writes one)'));
+  } else {
+    const pct = (bytes / capacity) * 100;
+    const status = thresholdStatus(pct, t.warnObjectsCapacityPct, t.failObjectsCapacityPct);
+    const measured = parseTime(store.measured);
+    const when = measured ? `, measured ${formatHours(hoursSince(measured, now))} ago` : '';
+    const advice = status === 'ok' ? '' : ' — time to add disk or move the buckets (docs/ObjectStorage.md)';
+    checks.push(makeCheck('objects_capacity', status, `object store ${round(pct, 1)}% of its capacity (${num(store.objects) ?? '?'} objects)${when}${advice}`, round(pct, 2)));
+  }
+
+  const copy = statusData?.objects_backup;
+  if (copy && typeof copy === 'object' && copy.enabled === false) {
+    checks.push(makeCheck('backup_objects', 'warn', 'objects have no off-site copy (BACKUP_UPLOAD is off)'));
+  } else if (statusData) {
+    const dest = typeof copy?.destination === 'string' ? ` to ${copy.destination}` : '';
+    checks.push(evaluateBackupSection('backup_objects', `off-site object copy${dest}`, copy, t.objectsBackupMaxAgeHours, now));
+  }
+  return {
+    checks,
+    section: {
+      enabled: true,
+      url: probe.url,
+      ...(probe.error ? { error: probe.error } : { http_status: probe.http_status, response_ms: probe.response_ms }),
+      store: store ?? null,
+      used_pct: capacity && bytes !== null ? round((bytes / capacity) * 100, 2) : null,
+    },
+  };
 }
 
 // ---------------------------------------------------------------- PostgreSQL rules
@@ -387,7 +442,7 @@ function buildConnections(rows, maxConnections) {
 const PG_DEPENDENT_CHECKS = ['connections', 'long_queries', 'blocked', 'wal_archive', 'cache_hit', 'xid_wraparound'];
 
 /**
- * @param probes { postgres, pgbouncer|null, host, backups, cert|null } raw probe results
+ * @param probes { postgres, pgbouncer|null, host, backups, cert|null, objects|null } raw probe results
  * @param prev   { archiverFailedCount } from the previous report, for "failed_count rose"
  */
 export function buildReport(probes, cfg, now, prev = {}) {
@@ -440,6 +495,7 @@ export function buildReport(probes, cfg, now, prev = {}) {
   const host = probes.host;
   const diskCheck = host.errors?.disk ? makeCheck('disk', 'fail', host.errors.disk) : evaluateDisk(host.disk, t);
   const backups = evaluateBackups(probes.backups, t, now);
+  const objects = probes.objects ? evaluateObjects(probes.objects, probes.backups?.data, t, now) : null;
   const certCheck = probes.cert ? evaluateCert(probes.cert, t, now) : null;
 
   checks.push(...[
@@ -450,6 +506,7 @@ export function buildReport(probes, cfg, now, prev = {}) {
     pgChecks.blocked,
     pgChecks.wal_archive,
     ...backups.checks,
+    ...(objects ? objects.checks : []),
     certCheck,
     pgChecks.cache_hit,
     pgChecks.xid_wraparound,
@@ -578,6 +635,7 @@ export function buildReport(probes, cfg, now, prev = {}) {
       disk: host.disk ?? { path: cfg.dataDir, error: host.errors?.disk },
     },
     backups: backups.section,
+    objects: objects ? objects.section : { enabled: false },
     tls: probes.cert
       ? probes.cert.error
         ? probes.cert

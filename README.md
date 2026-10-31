@@ -15,6 +15,10 @@ what's missing or broken, so the same command installs, repairs and confirms.
   backups, certificate) and `/metrics` (Prometheus).
 - **Backups**: pgBackRest point-in-time recovery + nightly encrypted `pg_dump`s, synced to a
   Dropbox folder on a schedule, verified weekly by actually restoring them.
+- Optional **object storage** (`ENABLE_OBJECTS`): Garage, S3-compatible, for apps' files (pictures,
+  uploads) so they stay out of Postgres. Private buckets and one key per app from `config/objects/`,
+  HTTPS through nginx, an hourly encrypted copy in the same Dropbox folder, restore-tested weekly.
+  Why and how: [docs/ObjectStorage.md](docs/ObjectStorage.md).
 - Optional **n8n** (alerts from `/status`, or anything else) and the Node/PM2 app stack from the
   old Contabo runbook.
 
@@ -56,6 +60,7 @@ port. `remote.sh` does that for you; if it can't get in, nothing is left locked.
 | `nginx` | HTTPS front for the health endpoint (and n8n), refuses unknown host names |
 | `tls` | Let's Encrypt via webroot once DNS points here (self-signed until then), renewal hook |
 | `stack` | Postgres + pgBackRest, PgBouncer, health, optional n8n; tuning; cluster roles |
+| `objects` | optional: Garage object store, its layout, each `config/objects/*.env`: buckets and a key (`ENABLE_OBJECTS`) |
 | `databases` | each `config/databases/*.env`: login, database, extensions, read-only login |
 | `backups` | timers for dumps, base backups, upload and verify; `cx-pgsql` on the PATH |
 | `node` | optional: nvm, Node, shared PM2 daemon (`ENABLE_NODE_STACK`) |
@@ -72,6 +77,7 @@ words from your machine. Teardown runs in reverse order and keeps data unless gi
 | `PGBOUNCER_PUBLIC_PORT` (28433) → 6432 | PgBouncer — what apps connect to | public, TLS + SCRAM, fail2ban, optional allow-list |
 | `PG_DIRECT_PORT` (28432) → 5432 | Postgres direct | loopback (SSH tunnel) unless `PG_DIRECT_BIND` says otherwise |
 | `HEALTH_PORT` (28480), `N8N_PORT` (28567) | health service, n8n | loopback, behind nginx |
+| `OBJECTS_S3_PORT` (28490), `OBJECTS_ADMIN_PORT` (28491) | Garage's S3 API (behind nginx on `OBJECTS_FQDN`), its admin API | loopback |
 
 22, 5432 and 6432 are not open.
 
@@ -83,12 +89,14 @@ steps/NN-*.sh       one file per step: describe, check, apply, teardown
 lib/                core (runner, templates, secrets, rollback), tls, pg, databases, backup, restore
 bin/cx-pgsql         operations on the server: databases, URLs, backups, restores, logs
 bin/remote.sh       from your machine: sync + apply + confirm, tunnel, Dropbox authorisation
-stack/              compose.yml, Dockerfiles, postgresql.conf template, health service, n8n workflow
-config/             server.env, authorized_keys, databases/*.env (samples committed; yours ignored)
+stack/              compose.yml, Dockerfiles, postgresql.conf template, health service, n8n workflow,
+                    objects/compose.yml (Garage)
+config/             server.env, authorized_keys, databases/*.env, objects/*.env (samples committed; yours ignored)
 docs/               Operations, Restore, VPS comparison
 tests/              a disposable "VPS" (systemd + Docker in a container) to run all of this locally
 ```
 
-More: [docs/Operations.md](docs/Operations.md) (day-to-day, adding a database, moving AltEd off Neon,
-alerts) · [docs/Restore.md](docs/Restore.md) (every kind of restore, disaster recovery) ·
+More: [docs/Operations.md](docs/Operations.md) (day-to-day, adding a database or an app's buckets, moving
+AltEd off Neon, alerts) · [docs/Restore.md](docs/Restore.md) (every kind of restore, disaster recovery) ·
+[docs/ObjectStorage.md](docs/ObjectStorage.md) (the object store: options, design, decisions) ·
 [stack/health/README.md](stack/health/README.md) (every check and threshold).

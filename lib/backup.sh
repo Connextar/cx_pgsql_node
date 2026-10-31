@@ -7,6 +7,8 @@
 #   upload    rclone to BACKUP_REMOTE (Dropbox): the pgBackRest repository mirrored, the
 #             encrypted dumps copied and pruned on their own (longer) schedule, and an
 #             encrypted bundle of the server's secrets.
+#   objects   rclone from the object store (Garage) to an rclone crypt remote on BACKUP_REMOTE:
+#             one encrypted copy of every object, hourly; deleted ones kept for a while.
 # `verify` proves all of it restores. Every job records its outcome in $BACKUP_STATUS_FILE,
 # which the health endpoint reads and alerts on.
 
@@ -269,6 +271,73 @@ backup_upload() {
   ok "Uploaded to $dest ($(numfmt --to=iec "$after") held there)"
 }
 
+# ─── Objects: the object store's off-site copy ─────────────────────────────────────
+# Sizes are measured every run (the health check's capacity warning reads them), even when there is
+# nowhere to copy to. The copy is `rclone sync` into cxcrypt:live/<bucket>; whatever it would delete
+# or overwrite there moves to cxcrypt:deleted/<today>/<bucket> instead, kept
+# OBJECTS_BACKUP_KEEP_DELETED_DAYS days. Objects are never changed in place by the apps here, so in
+# practice that folder holds deletions.
+_objects_measure() {
+  local b n bytes total=0 count=0 buckets='{}'
+  for b in $(obj_buckets) "$OBJ_VERIFY_BUCKET"; do
+    read -r n bytes < <(obj_bucket_usage "$b") || return 1
+    total=$((total + bytes)) count=$((count + n))
+    buckets=$(jq --arg b "$b" --argjson n "$n" --argjson s "$bytes" '.[$b] = {objects: $n, bytes: $s}' <<<"$buckets")
+  done
+  status_update '.objects = {measured: $now, capacity_bytes: ($c | tonumber), bytes: ($t | tonumber), objects: ($n | tonumber), buckets: ($b | fromjson)}' \
+    --arg c "$(obj_capacity_bytes)" --arg t "$total" --arg n "$count" --arg b "$buckets"
+  info "Object store: $count objects, $(numfmt --to=iec "$total") of $OBJECTS_CAPACITY"
+}
+
+_objects_prune_deleted() {
+  local d cutoff removed=0
+  cutoff=$(date -u -d "-$OBJECTS_BACKUP_KEEP_DELETED_DAYS days" +%F)
+  for d in $(rclone_x lsf --dirs-only cxcrypt:deleted 2>/dev/null | tr -d /); do
+    [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$d" < "$cutoff" ]] || continue
+    rclone_x purge "cxcrypt:deleted/$d" && removed=$((removed + 1))
+  done
+  ((removed == 0)) || info "Removed $removed day(s) of deleted objects older than $OBJECTS_BACKUP_KEEP_DELETED_DAYS days from the off-site copy."
+}
+
+backup_objects() {
+  if ! is_true "$ENABLE_OBJECTS"; then
+    status_update '.objects_backup.enabled = false'
+    info "ENABLE_OBJECTS is off."
+    return 0
+  fi
+  obj_health_ok || {
+    status_update '.objects_backup.last_attempt = $now | .objects_backup.last_error = "Garage is not healthy"'
+    die "Garage is not healthy (cx-pgsql objects status)."
+  }
+  _objects_measure || warn "Couldn't measure the buckets."
+  if ! is_true "$BACKUP_UPLOAD"; then
+    status_update '.objects_backup.enabled = false'
+    warn "BACKUP_UPLOAD is off: the objects have no off-site copy."
+    return 0
+  fi
+  status_update '.objects_backup.enabled = true | .objects_backup.destination = $d | .objects_backup.last_attempt = $now' --arg d "$(remote_dest)/objects (rclone crypt)"
+  if ! remote_configured; then
+    status_update '.objects_backup.last_error = "rclone remote not configured (bin/remote.sh dropbox-auth)"'
+    die "No rclone remote '$BACKUP_REMOTE' in $RCLONE_CONF — run bin/remote.sh dropbox-auth from your machine."
+  fi
+  obj_rclone_env "$OBJ_BACKUP_KEY"
+  obj_crypt_env
+  local flags=() b errors=() today
+  mapfile -t flags < <(rclone_flags)
+  today=$(date -u +%F)
+  for b in $(obj_backup_buckets); do
+    info "Copying bucket $b (encrypted) to $(remote_dest)/objects"
+    rclone_x sync "${flags[@]}" --backup-dir "cxcrypt:deleted/$today/$b" "cxobj:$b" "cxcrypt:live/$b" || errors+=("$b")
+  done
+  _objects_prune_deleted || errors+=("prune")
+  if ((${#errors[@]})); then
+    status_update '.objects_backup.last_error = $e' --arg e "failed: ${errors[*]}"
+    die "Objects copy failed: ${errors[*]}"
+  fi
+  status_update '.objects_backup.last_success = $now | .objects_backup.last_error = null'
+  ok "Objects copied off-site to $(remote_dest)/objects"
+}
+
 # ─── Verify: prove it restores ─────────────────────────────────────────────────────
 _verify_checksums() {
   local f bad=0
@@ -333,17 +402,78 @@ _verify_physical() {
   ok "Physical backup restores (databases: $dbs)"
 }
 
+# The objects' off-site copy, two ways. First every object older than two hours is compared with
+# its encrypted copy (rclone cryptcheck: by hash, nothing downloaded) — two hours, because a newer
+# one may not have had its hourly copy yet, and one way, because the copy may still hold objects
+# deleted since. The list of names comes from the live side alone: an age filter given to the
+# check itself would apply to the copy's timestamps too. Then a random sample per bucket is restored from the copy into the scratch
+# bucket and compared byte for byte with the live objects.
+_verify_objects() {
+  is_true "$ENABLE_OBJECTS" && is_true "$BACKUP_UPLOAD" && remote_configured || return 0
+  (
+    obj_rclone_env "$OBJ_BACKUP_KEY"
+    obj_crypt_env
+    local b list results='{}' bad=0 failed checked sampled
+    list=$(mktemp)
+    for b in $(obj_backup_buckets); do
+      info "Objects: checking bucket $b against its encrypted copy"
+      failed=0 sampled=0
+      checked=$(rclone_x lsf -R --files-only --min-age 2h "cxobj:$b" | tee "$list" | wc -l)
+      if ((checked > 0)) && ! rclone_x cryptcheck --one-way --files-from "$list" "cxobj:$b" "cxcrypt:live/$b"; then
+        err "Bucket $b: the off-site copy differs (cryptcheck above)"
+        failed=1
+      else
+        shuf -n "$OBJECTS_VERIFY_SAMPLE" "$list" >"$list.sample" || true
+        sampled=$(wc -l <"$list.sample")
+        rclone_x delete "cxobj:$OBJ_VERIFY_BUCKET/$b" 2>/dev/null || true
+        if ((sampled > 0)); then
+          if ! rclone_x copy --files-from "$list.sample" "cxcrypt:live/$b" "cxobj:$OBJ_VERIFY_BUCKET/$b" ||
+            ! rclone_x check --download --one-way --files-from "$list.sample" "cxobj:$b" "cxobj:$OBJ_VERIFY_BUCKET/$b"; then
+            err "Bucket $b: objects restored from the off-site copy don't match"
+            failed=1
+          fi
+          rclone_x delete "cxobj:$OBJ_VERIFY_BUCKET/$b" || true
+        fi
+      fi
+      ((failed)) || ok "Bucket $b: $checked objects match their copy; $sampled restored and identical"
+      ((failed)) && bad=1
+      results=$(jq --arg b "$b" --argjson n "$checked" --argjson s "$sampled" --argjson ok "$( ((failed)) && echo false || echo true)" \
+        '.[$b] = {checked: $n, restored: $s, ok: $ok}' <<<"$results")
+    done
+    # The deleted/ archive has nothing live to compare with, but rclone crypt authenticates every
+    # block: reading a sample back in full proves those files are intact and decryptable.
+    local f read=0 unreadable=0
+    while read -r f; do
+      [[ -n "$f" ]] || continue
+      read=$((read + 1))
+      rclone_x cat "cxcrypt:deleted/$f" >/dev/null 2>&1 || { err "Deleted object can't be read back: deleted/$f"; unreadable=$((unreadable + 1)); }
+    done < <(rclone_x lsf -R --files-only cxcrypt:deleted 2>/dev/null | shuf -n "$OBJECTS_VERIFY_SAMPLE")
+    ((unreadable)) && bad=1
+    ((read == 0 || unreadable)) || ok "Deleted objects: $read read back and intact"
+    results=$(jq --argjson n "$read" --argjson ok "$( ((unreadable)) && echo false || echo true)" \
+      '.["deleted/"] = {read: $n, ok: $ok}' <<<"$results")
+    rm -f "$list" "$list.sample"
+    printf '%s\n' "$results" >"/run/cx-pgsql/verify-objects.json"
+    exit $bad
+  )
+}
+
 backup_verify() {
   local errors=()
   status_update '.verify.last_attempt = $now'
   _verify_checksums || errors+=("checksums")
   _verify_logical || errors+=("logical")
   if is_true "$BACKUP_VERIFY_PITR"; then _verify_physical || errors+=("physical"); fi
-  local results=${VERIFY_RESULTS:-}
+  rm -f /run/cx-pgsql/verify-objects.json
+  _verify_objects || errors+=("objects")
+  local results=${VERIFY_RESULTS:-} objects='null'
   [[ -n "$results" ]] || results='{}'
+  [[ -s /run/cx-pgsql/verify-objects.json ]] && objects=$(cat /run/cx-pgsql/verify-objects.json)
   if ((${#errors[@]})); then
-    status_update '.verify.last_error = $e | .verify.databases = ($r | fromjson)' --arg e "failed: ${errors[*]}" --arg r "$results"
+    status_update '.verify.last_error = $e | .verify.databases = ($r | fromjson) | .verify.objects = ($o | fromjson)' \
+      --arg e "failed: ${errors[*]}" --arg r "$results" --arg o "$objects"
     die "Verify failed: ${errors[*]}"
   fi
-  status_update '.verify.last_success = $now | .verify.last_error = null | .verify.databases = ($r | fromjson)' --arg r "$results"
+  status_update '.verify.last_success = $now | .verify.last_error = null | .verify.databases = ($r | fromjson) | .verify.objects = ($o | fromjson)' \
+    --arg r "$results" --arg o "$objects"
 }

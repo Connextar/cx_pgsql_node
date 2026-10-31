@@ -78,6 +78,8 @@ export function loadConfig(env = process.env) {
     },
 
     backupStatusFile: str('BACKUP_STATUS_FILE', '/backups/status/status.json'),
+    // The object store's own health endpoint (Garage's admin API /health). Empty = no object store.
+    objects: { healthUrl: str('OBJECTS_HEALTH_URL', '') },
     // CERT_FILE set to an empty string switches the tls_cert check off; unset means the default path.
     certFile: env.CERT_FILE === undefined ? '/certs/server.crt' : env.CERT_FILE,
     dataDir: str('DATA_DIR', '/pgdata'),
@@ -96,6 +98,9 @@ export function loadConfig(env = process.env) {
       certWarnDays: number('CERT_WARN_DAYS', 14, { min: 0 }),
       certFailDays: number('CERT_FAIL_DAYS', 3, { min: 0 }),
       minCacheHitPct: number('MIN_CACHE_HIT_PCT', 90, { min: 0, max: 100 }),
+      objectsBackupMaxAgeHours: number('OBJECTS_BACKUP_MAX_AGE_HOURS', 3, { min: 0 }),
+      warnObjectsCapacityPct: number('WARN_OBJECTS_CAPACITY_PCT', 50, { min: 0, max: 100 }),
+      failObjectsCapacityPct: number('FAIL_OBJECTS_CAPACITY_PCT', 90, { min: 0, max: 100 }),
     },
 
     cacheSeconds: number('CACHE_SECONDS', 15, { min: 0, max: 3600 }),
@@ -106,6 +111,8 @@ export function loadConfig(env = process.env) {
   if (t.warnConnPct > t.failConnPct) problems.push('WARN_CONN_PCT must not exceed FAIL_CONN_PCT');
   if (t.warnDiskPct > t.failDiskPct) problems.push('WARN_DISK_PCT must not exceed FAIL_DISK_PCT');
   if (t.certFailDays > t.certWarnDays) problems.push('CERT_FAIL_DAYS must not exceed CERT_WARN_DAYS');
+  if (t.warnObjectsCapacityPct > t.failObjectsCapacityPct) problems.push('WARN_OBJECTS_CAPACITY_PCT must not exceed FAIL_OBJECTS_CAPACITY_PCT');
+  if (cfg.objects.healthUrl && !/^https?:\/\/[^\s]+$/.test(cfg.objects.healthUrl)) problems.push(`OBJECTS_HEALTH_URL must be an http(s) URL (got "${cfg.objects.healthUrl}")`);
 
   if (problems.length) throw new ConfigError(problems);
   return cfg;
@@ -119,6 +126,7 @@ export function describeConfig(cfg) {
     `pg=${cfg.pg.user}@${cfg.pg.host}:${cfg.pg.port}/${cfg.pg.database}`,
     `pg_password=${cfg.pg.password ? 'set' : 'unset'}`,
     cfg.pgbouncer.enabled ? `pgbouncer=${cfg.pgbouncer.host}:${cfg.pgbouncer.port} probe_db=${cfg.pgbouncer.probeDatabase}` : 'pgbouncer=disabled',
+    cfg.objects.healthUrl ? `objects=${cfg.objects.healthUrl}` : 'objects=disabled',
     `cache=${cfg.cacheSeconds}s`,
     `query_text=${cfg.includeQueryText}`,
   ].join(' ');

@@ -4,7 +4,7 @@
 
 SYSTEMD_DIR=/etc/systemd/system
 
-backups_describe() { echo "Backup timers: dumps, pgBackRest, upload to $BACKUP_REMOTE:$BACKUP_REMOTE_PATH, weekly verify"; }
+backups_describe() { echo "Backup timers: dumps, pgBackRest, upload to $BACKUP_REMOTE:$BACKUP_REMOTE_PATH$(is_true "$ENABLE_OBJECTS" && printf ', objects'), weekly verify"; }
 
 # job|schedule|enabled
 _bk_jobs() {
@@ -12,6 +12,7 @@ _bk_jobs() {
   printf 'physical|%s|%s\n' "$BACKUP_PHYSICAL_SCHEDULE" "$(is_true "$BACKUP_PITR" && echo true || echo false)"
   printf 'upload|%s|%s\n' "$BACKUP_UPLOAD_SCHEDULE" "$(is_true "$BACKUP_UPLOAD" && echo true || echo false)"
   printf 'verify|%s|true\n' "$BACKUP_VERIFY_SCHEDULE"
+  printf 'objects|%s|%s\n' "$OBJECTS_BACKUP_SCHEDULE" "$(is_true "$ENABLE_OBJECTS" && echo true || echo false)"
 }
 
 _bk_service() {
@@ -110,8 +111,9 @@ backups_apply() {
   done < <(_bk_jobs)
   _bk_logrotate | write_if_changed /etc/logrotate.d/cx-pgsql || true
   # Record whether uploads are on, so the health check knows to expect them.
-  status_update '.upload.enabled = ($u == "1") | .physical.enabled = ($p == "1")' \
-    --arg u "$(is_true "$BACKUP_UPLOAD" && echo 1 || echo 0)" --arg p "$(is_true "$BACKUP_PITR" && echo 1 || echo 0)"
+  status_update '.upload.enabled = ($u == "1") | .physical.enabled = ($p == "1") | .objects_backup.enabled = ($o == "1")' \
+    --arg u "$(is_true "$BACKUP_UPLOAD" && echo 1 || echo 0)" --arg p "$(is_true "$BACKUP_PITR" && echo 1 || echo 0)" \
+    --arg o "$(is_true "$ENABLE_OBJECTS" && is_true "$BACKUP_UPLOAD" && echo 1 || echo 0)"
 
   is_true "$BACKUP_UPLOAD" && ! remote_configured &&
     warn "Uploads are on but no rclone remote is configured: from your machine run  bin/remote.sh dropbox-auth"
@@ -121,7 +123,7 @@ backups_apply() {
 
 backups_teardown() {
   local job
-  for job in logical physical upload verify; do
+  for job in logical physical upload verify objects; do
     systemctl disable --now "cx-backup-$job.timer" >/dev/null 2>&1 || true
     rm -f "$SYSTEMD_DIR/cx-backup-$job.timer"
   done

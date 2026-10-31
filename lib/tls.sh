@@ -8,6 +8,7 @@
 tls_domains() {
   printf '%s\n' "$SERVER_FQDN"
   is_true "$ENABLE_N8N" && printf '%s\n' "$N8N_FQDN"
+  is_true "$ENABLE_OBJECTS" && printf '%s\n' "$OBJECTS_FQDN"
   return 0
 }
 

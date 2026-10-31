@@ -3,6 +3,8 @@ config/server.env
 config/authorized_keys
 config/databases/*.env
 !config/databases/*.env.sample
+config/objects/*.env
+!config/objects/*.env.sample
 
 node_modules/
 .DS_Store

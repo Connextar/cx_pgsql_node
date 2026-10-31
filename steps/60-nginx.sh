@@ -5,7 +5,7 @@
 NGINX_SITES=/etc/nginx/sites-available
 NGINX_ENABLED=/etc/nginx/sites-enabled
 
-nginx_describe() { echo "nginx: https://$SERVER_FQDN/healthz|status|metrics → health service; certbot"; }
+nginx_describe() { echo "nginx: https://$SERVER_FQDN/healthz|status|metrics → health service$(is_true "$ENABLE_OBJECTS" && printf '; https://%s → object store' "$OBJECTS_FQDN"); certbot"; }
 
 _nginx_common() {
   cat <<'EOF'
@@ -19,6 +19,11 @@ ssl_session_cache shared:cx_ssl:10m;
 ssl_session_timeout 1d;
 ssl_session_tickets off;
 EOF
+  # The object store's own limit (per address; Vercel's functions share theirs, so it's generous).
+  if is_true "$ENABLE_OBJECTS"; then
+    printf 'limit_req_zone $binary_remote_addr zone=cx_objects:10m rate=%s;\n' "$OBJECTS_RATE_LIMIT"
+  fi
+  return 0
 }
 
 _nginx_default() {
@@ -114,6 +119,37 @@ $(_nginx_tls_lines "$N8N_FQDN")
 EOF
 }
 
+# The S3 API. The request goes to Garage exactly as it came (no URI in proxy_pass, the Host header
+# kept): both are part of the signature it checks. Bodies stream through in both directions.
+_nginx_objects_site() {
+  printf '# Managed by CX_PGSQL_Node_1 setup (steps/60-nginx.sh).\n'
+  _nginx_http_block "$OBJECTS_FQDN"
+  cat <<EOF
+server {
+	listen 443 ssl;
+	listen [::]:443 ssl;
+	server_name $OBJECTS_FQDN;
+$(_nginx_tls_lines "$OBJECTS_FQDN")
+	access_log /var/log/nginx/cx-objects.access.log;
+	client_max_body_size $OBJECTS_MAX_BODY;
+
+	location / {
+		limit_req zone=cx_objects burst=$OBJECTS_RATE_BURST nodelay;
+		proxy_pass http://127.0.0.1:$OBJECTS_S3_PORT;
+		proxy_http_version 1.1;
+		proxy_set_header Host \$host;
+		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_set_header Connection "";
+		proxy_request_buffering off;
+		proxy_buffering off;
+		proxy_read_timeout 300s;
+		proxy_send_timeout 300s;
+	}
+}
+EOF
+}
+
 _nginx_linked() { [[ "$(readlink -f "$NGINX_ENABLED/$1")" == "$NGINX_SITES/$1" ]]; }
 
 nginx_check() {
@@ -126,6 +162,10 @@ nginx_check() {
   if is_true "$ENABLE_N8N"; then
     chk_render "site $N8N_FQDN (n8n)" "$NGINX_SITES/$N8N_FQDN.conf" _nginx_n8n_site
     chk "site $N8N_FQDN enabled" _nginx_linked "$N8N_FQDN.conf"
+  fi
+  if is_true "$ENABLE_OBJECTS"; then
+    chk_render "site $OBJECTS_FQDN (object store)" "$NGINX_SITES/$OBJECTS_FQDN.conf" _nginx_objects_site
+    chk "site $OBJECTS_FQDN enabled" _nginx_linked "$OBJECTS_FQDN.conf"
   fi
   chk "nginx -t" nginx -t -q
   chk "nginx running and enabled" sh -c 'systemctl is-active --quiet nginx && systemctl is-enabled --quiet nginx'
@@ -153,6 +193,12 @@ nginx_apply() {
   else
     rm -f "$NGINX_ENABLED/$N8N_FQDN.conf"
   fi
+  if is_true "$ENABLE_OBJECTS"; then
+    _nginx_objects_site | write_if_changed "$NGINX_SITES/$OBJECTS_FQDN.conf" || true
+    _nginx_enable "$OBJECTS_FQDN.conf"
+  else
+    rm -f "$NGINX_ENABLED/$OBJECTS_FQDN.conf"
+  fi
 
   # From the runbook: the apps group may edit nginx sites and read its logs.
   local d
@@ -169,6 +215,7 @@ nginx_apply() {
 nginx_teardown() {
   rm -f "$NGINX_ENABLED/$SERVER_FQDN.conf" "$NGINX_SITES/$SERVER_FQDN.conf" \
     "$NGINX_ENABLED/$N8N_FQDN.conf" "$NGINX_SITES/$N8N_FQDN.conf" \
+    "$NGINX_ENABLED/$OBJECTS_FQDN.conf" "$NGINX_SITES/$OBJECTS_FQDN.conf" \
     "$NGINX_ENABLED/00-cx-default.conf" "$NGINX_SITES/00-cx-default.conf" /etc/nginx/conf.d/00-cx.conf
   [[ -e "$NGINX_SITES/default" && ! -e "$NGINX_ENABLED/default" ]] && ln -s "$NGINX_SITES/default" "$NGINX_ENABLED/default"
   nginx -t -q 2>/dev/null && systemctl reload nginx 2>/dev/null || true

@@ -1,0 +1,46 @@
+# CX_PGSQL_Node_1 — the object store (Garage, S3-compatible).
+#
+# Deployed to $OBJECTS_DIR by `setup.sh apply objects`, which writes the .env this file reads,
+# garage.toml and the copies of the secrets it names. Don't edit those generated files: change
+# config/server.env (or steps/72-objects.sh) and re-run the setup.
+#
+# Its own compose project, so the database stack's `up --remove-orphans` never touches it; it
+# joins the stack's network only so the health service can ask it how it is.
+name: ${OBJECTS_PROJECT}
+
+services:
+  garage:
+    image: ${OBJECTS_IMAGE}
+    container_name: ${OBJECTS_CONTAINER}
+    restart: unless-stopped
+    user: "${OBJECTS_UID}:${OBJECTS_UID}"
+    stop_grace_period: 1m
+    environment:
+      RUST_LOG: garage=info
+      NO_COLOR: "1"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - ./secrets:/run/cx-secrets:ro
+      - ${OBJECTS_DATA_DIR}/meta:/var/lib/garage/meta
+      - ${OBJECTS_DATA_DIR}/data:/var/lib/garage/data
+    ports:
+      # S3 API (nginx proxies OBJECTS_FQDN to it) and the admin API: loopback only.
+      - "127.0.0.1:${OBJECTS_S3_PORT}:3900"
+      - "127.0.0.1:${OBJECTS_ADMIN_PORT}:3903"
+    healthcheck:
+      # The image has nothing but the binary; `garage status` talks to the node over RPC.
+      test: ["CMD", "/garage", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: ${OBJECTS_MEMORY_LIMIT}
+    networks: [db]
+
+networks:
+  db:
+    name: ${STACK_NETWORK}
+    external: true

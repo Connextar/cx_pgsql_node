@@ -12,7 +12,7 @@
 #                                             the source URL is read from stdin, never the command line
 #
 #   cx-pgsql backup run                        logical + physical + upload (what the timers do)
-#   cx-pgsql backup logical|physical [auto|full|diff|incr]|upload|verify
+#   cx-pgsql backup logical|physical [auto|full|diff|incr]|upload|objects|verify
 #   cx-pgsql backup status | list
 #   cx-pgsql backup dropbox-configure          (token JSON, or token + app id/secret JSON, on stdin)
 #
@@ -21,6 +21,14 @@
 #   cx-pgsql restore pitr [--time "YYYY-MM-DD HH:MM:SS+00"] [--port 28439]   inspection copy
 #   cx-pgsql restore in-place [--time "…"] --yes                             replace the live cluster
 #   cx-pgsql restore cleanup
+#
+#   cx-pgsql objects status                    Garage's health, layout and nodes
+#   cx-pgsql objects list                      buckets (objects, size, app) and keys; flags any not in config
+#   cx-pgsql objects key <app> [--show-secret] the S3 settings the app needs
+#   cx-pgsql objects key <app> rotate          a new key for the app (the old one works until drop-previous)
+#   cx-pgsql objects key <app> drop-previous   delete the app's previous key from Garage
+#   cx-pgsql objects restore <bucket> [--deleted YYYY-MM-DD] [key...] | --all
+#                                             copy objects back from the encrypted off-site copy
 #
 #   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
 set -Eeuo pipefail
@@ -31,7 +39,7 @@ export PROJECT_DIR
 LOG_FILE=/var/log/cx-pgsql.log
 # shellcheck source=../lib/core.sh
 source "$PROJECT_DIR/lib/core.sh"
-for _lib in tls dbconf pg backup restore; do
+for _lib in tls dbconf pg backup restore objects; do
   # shellcheck source=/dev/null
   source "$PROJECT_DIR/lib/$_lib.sh"
 done
@@ -55,6 +63,7 @@ cmd_info() {
   printf '  Postgres       %s:%s  (direct)\n' "$PG_DIRECT_BIND" "$PG_DIRECT_PORT"
   printf '  Health         https://%s/healthz  ·  /status and /metrics need the token (cx-pgsql secret show health-token)\n' "$SERVER_FQDN"
   is_true "$ENABLE_N8N" && printf '  n8n            https://%s/\n' "$N8N_FQDN"
+  is_true "$ENABLE_OBJECTS" && printf '  Objects        https://%s/  (S3, signed requests only; cx-pgsql objects list)\n' "$OBJECTS_FQDN"
   printf '  TLS            %s (%s days left)\n' \
     "$(tls_is_self_signed "$SERVER_FQDN" && echo 'self-signed placeholder' || echo "Let's Encrypt")" "$(tls_days_left "$SERVER_FQDN" || echo '?')"
   printf '  Backups        %s → %s:%s\n' "$BACKUP_ROOT" "$BACKUP_REMOTE" "$BACKUP_REMOTE_PATH"
@@ -186,6 +195,7 @@ cmd_backup() {
     logical) backup_lock; backup_logical ;;
     physical) backup_lock; backup_physical "${1:-auto}" ;;
     upload) backup_lock; backup_upload ;;
+    objects) backup_lock; backup_objects ;;
     verify) backup_lock; backup_verify ;;
     run)
       backup_lock
@@ -194,6 +204,7 @@ cmd_backup() {
       (backup_logical) || failed=1
       (backup_physical auto) || failed=1
       (backup_upload) || failed=1
+      if is_true "$ENABLE_OBJECTS"; then (backup_objects) || failed=1; fi
       exit $failed
       ;;
     status) jq . "$BACKUP_STATUS_FILE" ;;
@@ -256,6 +267,74 @@ cmd_restore() {
   esac
 }
 
+# ─── objects ───────────────────────────────────────────────────────────────────────
+cmd_objects() {
+  local sub=${1:-status}
+  shift || true
+  is_true "$ENABLE_OBJECTS" || die "The object store is off (ENABLE_OBJECTS)."
+  case $sub in
+    status)
+      section "Garage ($OBJECTS_IMAGE)"
+      docker exec "$OBJECTS_CONTAINER" /garage status 2>/dev/null | grep -v '^\s*$' || warn "Garage isn't running."
+      obj_api GET GetClusterHealth | jq .
+      ;;
+    list)
+      local configured keys b app n bytes
+      configured=" $(obj_buckets | tr '\n' ' ') $OBJ_VERIFY_BUCKET "
+      printf '%-28s %10s %10s  %s\n' BUCKET OBJECTS SIZE APP
+      for b in $(obj_api GET ListBuckets | jq -r '.[].globalAliases[0] // empty' | sort); do
+        read -r n bytes < <(obj_bucket_usage "$b")
+        app=$(obj_owner_of "$b")
+        [[ "$b" == "$OBJ_VERIFY_BUCKET" ]] && app="(restore test)"
+        [[ "$configured" == *" $b "* ]] || app="not in config"
+        printf '%-28s %10s %10s  %s\n' "$b" "$n" "$(numfmt --to=iec "$bytes")" "$app"
+      done
+      section "Keys"
+      keys=" $(obj_names | tr '\n' ' ') $OBJ_BACKUP_KEY "
+      obj_api GET ListKeys | jq -r '.[] | "\(.name)\t\(.id)"' | sort | while IFS=$'\t' read -r name id; do
+        printf '  %-20s %s%s\n' "$name" "$id" "$([[ "$keys" == *" $name "* ]] || printf '  (not in config)')"
+      done
+      ;;
+    key)
+      local app=${1:?app} action=${2:-show} sk
+      [[ " $(obj_names | tr '\n' ' ') " == *" $app "* ]] || die "No app '$app' in config/objects/."
+      case $action in
+        show | --show-secret)
+          sk='<secret>'
+          [[ "$action" == --show-secret ]] && sk=$(cat "$(secret_path "$(obj_key_secret_secret "$app")")")
+          section "$app — S3 settings (path-style; the buckets are private, every request is signed)"
+          printf 'OBJECTS_ENDPOINT=https://%s\nOBJECTS_REGION=garage\nOBJECTS_ACCESS_KEY_ID=%s\nOBJECTS_SECRET_ACCESS_KEY=%s\n' \
+            "$OBJECTS_FQDN" "$(obj_key_id "$app")" "$sk"
+          printf '# buckets: %s\n' "$(obj_each sh -c '[ "$OBJ_NAME" = "$1" ] && printf "%s" "$OBJ_BUCKETS"; true' sh "$app")"
+          [[ "$action" == --show-secret ]] || info "Add --show-secret to include the secret key."
+          if tls_is_self_signed "$OBJECTS_FQDN"; then
+            warn "Self-signed certificate on $OBJECTS_FQDN until Let's Encrypt issues one: clients will refuse it."
+          fi
+          ;;
+        rotate)
+          local s
+          for s in "$(obj_key_id_secret "$app")" "$(obj_key_secret_secret "$app")"; do
+            mv "$(secret_path "$s")" "$(secret_path "$s").previous"
+          done
+          "$PROJECT_DIR/setup.sh" apply objects >/dev/null
+          ok "New key for $app: cx-pgsql objects key $app --show-secret. The old one works until: cx-pgsql objects key $app drop-previous"
+          ;;
+        drop-previous)
+          local prev
+          prev="$(secret_path "$(obj_key_id_secret "$app")").previous"
+          [[ -s "$prev" ]] || die "$app has no previous key."
+          obj_api POST "DeleteKey?id=$(cat "$prev")" >/dev/null
+          rm -f "$prev" "$(secret_path "$(obj_key_secret_secret "$app")").previous"
+          ok "Deleted $app's previous key."
+          ;;
+        *) die "objects key <app> [--show-secret|rotate|drop-previous]" ;;
+      esac
+      ;;
+    restore) backup_lock; obj_restore "$@" ;;
+    *) die "objects status|list|key|restore" ;;
+  esac
+}
+
 case $1 in
   info) cmd_info ;;
   ps) _compose ps ;;
@@ -266,6 +345,7 @@ case $1 in
   db) shift; cmd_db "$@" ;;
   backup) shift; cmd_backup "$@" ;;
   restore) shift; cmd_restore "$@" ;;
+  objects) shift; cmd_objects "$@" ;;
   secret)
     [[ "${2:-}" == show && -n "${3:-}" ]] || die "cx-pgsql secret show <name>  (names: $(ls "$SECRETS_DIR" | tr '\n' ' '))"
     cat "$(secret_path "$3")"
