@@ -73,7 +73,28 @@ re-read it after a busy week:
 Postgres buys little. The lever is **fewer sequential round trips per page** — work in the app, not on
 this server.
 
-## 3. Backups
+## 3. Round trips per page in AltEd, 2026-10-31
+
+Counted on a local production build of AltEd, against a local Postgres behind a proxy that adds a fixed
+delay and counts round trips. Sequential trips = (time at a 50 ms round trip − time at 0) ÷ 50 ms.
+Method, scripts and raw results are in AltEd's `docs/local/round-trips-2026-10-31/`. They ran on local
+seed data, which is far smaller than production's.
+
+| AltEd page or call                | Sequential trips | Queries | Here (× 2.63 ms) | Neon (× 0.98 ms) |
+| --------------------------------- | ---------------- | ------- | ---------------- | ---------------- |
+| Family home `/dashboard`          | 26               | 135     | 69 ms            | 26 ms            |
+| Providers (Connections)           | 17               | 83      | 46 ms            | 17 ms            |
+| Messages                          | 15–16            | 29–41   | 41 ms            | 15 ms            |
+| Most other dashboard pages        | 4–8              | 10–43   | 11–21 ms         | 4–8 ms           |
+| An API call (bell, credits badge) | 2                | 2–4     | 5 ms             | 2 ms             |
+| Public pages                      | 0–1              | 0–1     | ≤ 3 ms           | ≤ 1 ms           |
+
+**What reduces them.** Prisma's `relationJoins` (a preview feature in 7.10) turns each nested `include`
+into one query, where today each level is a separate query sent after the one above it. Tried locally, it
+took all 48 measured targets from 287 sequential trips to 193 and from 954 queries to 523: the family home
+page went 26 → 11. A pool of 30 instead of 10 saved only 1–3 trips on the heaviest pages.
+
+## 4. Backups
 
 - AltEd's encrypted dump: **410 MB**, almost all of it listing pictures (`listing_image.content`,
   pictures stored in Postgres): its `COPY` takes 27–44 s of the dump's time.
