@@ -1,8 +1,8 @@
 # Object storage on this server
 
-_Proposed 2026-10-31. The owner chose Garage the same day and asked for the server side to be built
-and tested on the disposable VPS, **not applied to the real server yet**. Built and tested 2026-10-31
-(§3–4, and tests/README.md). The app's side, for AltEd, is `alt-ed-web-app/docs/ObjectStorage.md`._
+_Proposed 2026-10-31. The owner chose Garage the same day; built and tested on the disposable VPS
+(§3–4, and tests/README.md), then **applied to the real server the same afternoon** (§7). The app's side,
+for AltEd, is `alt-ed-web-app/docs/ObjectStorage.md` (v0.152.0)._
 
 ## 1. Why
 
@@ -176,5 +176,14 @@ off, then on (tests/README.md).
    password manager.
 6. **Run it once:** `cx-pgsql backup objects`, then `cx-pgsql health`. `objects`, `objects_capacity`
    and `backup_objects` should all be ok.
-7. **For the app:** `cx-pgsql objects key alted --show-secret` → Vercel env (the app proposal's
-   release A). Like the database URLs, you run this, not me.
+7. **For the app:** `bin/remote.sh objects-vercel alted <app dir>` sets `OBJECTS_ENDPOINT`,
+   `OBJECTS_REGION`, `OBJECTS_ACCESS_KEY_ID` and `OBJECTS_SECRET_ACCESS_KEY` in Vercel and the app's
+   `.env.local`, as `point-vercel` does for the database: the secret goes from the server to the Vercel CLI's
+   stdin and is never printed. It warns if the endpoint's certificate isn't trusted yet.
+
+**Done on the real server, 2026-10-31 (owner's go-ahead):** steps 2–4 and 6–7 as above. The `apply` with
+objects off recreated only the health container; with objects on it added Garage, the nginx site, the
+`cx-backup-objects` timer and a Let's Encrypt certificate for `s3-node-1.connextar.com` (the owner added the
+record), and Postgres and PgBouncer were not restarted. The first `backup objects` on an empty store found a
+bug the test VPS couldn't: no `deleted/` folder yet made the prune step's listing fail (fixed). Step 5, the
+second copies of the crypt passwords, is the owner's.

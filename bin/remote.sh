@@ -15,6 +15,10 @@
 #                                             set the app's DATABASE_URL (pooled) and
 #                                             DATABASE_DIRECT_URL (session) in Vercel and its
 #                                             .env.local, without printing the password
+#   bin/remote.sh objects-vercel <app> <app dir> [environment]
+#                                             set the app's OBJECTS_* S3 settings (endpoint, region,
+#                                             key id, secret) in Vercel and its .env.local, without
+#                                             printing the secret
 #   bin/remote.sh dropbox-auth [--client-id APP_KEY]
 #                                             authorise Dropbox in your browser (needs rclone
 #                                             here) and install the token on the server; with
@@ -49,6 +53,7 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
 say() { printf '› %s\n' "$*"; }
 ok() { printf '✓ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
+warn() { printf '! %s\n' "$*" >&2; }
 
 # Pick the way in: the hardened one if it works, else the bootstrap one.
 pick_target() {
@@ -217,6 +222,44 @@ cmd_point_vercel() {
   say "Takes effect on the app's next deployment."
 }
 
+cmd_objects_vercel() {
+  local usage="usage: bin/remote.sh objects-vercel <app> <app dir> [vercel environment]"
+  local name=${1:?$usage} app=${2:?$usage} target=${3:-production} out var value
+  local vars=(OBJECTS_ENDPOINT OBJECTS_REGION OBJECTS_ACCESS_KEY_ID OBJECTS_SECRET_ACCESS_KEY)
+  command -v vercel >/dev/null || die "The Vercel CLI isn't installed here."
+  app=$(cd "$app" && pwd)
+  [[ -f "$app/.vercel/project.json" ]] || die "$app isn't linked to a Vercel project (run vercel link there)."
+  pick_target
+  out=$(rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql objects key $name --show-secret" 2>/dev/null | tr -d '\r')
+  for var in "${vars[@]}"; do
+    value=$(printf '%s\n' "$out" | sed -n "s/^$var=//p")
+    [[ -n $value && $value != '<secret>' ]] || die "Couldn't read $var for $name from the server (cx-pgsql objects key $name)."
+  done
+  # Any HTTP answer will do: what matters is that a client accepts the certificate.
+  curl -sS -o /dev/null --max-time 10 "https://$OBJECTS_FQDN/" 2>/dev/null ||
+    warn "https://$OBJECTS_FQDN doesn't answer with a trusted certificate yet: the app can't connect until it does."
+
+  for var in "${vars[@]}"; do
+    value=$(printf '%s\n' "$out" | sed -n "s/^$var=//p")
+    printf '%s' "$value" | vercel env add "$var" "$target" --force --sensitive --yes --cwd "$app" >/dev/null 2>&1 ||
+      die "vercel env add $var failed (is the CLI signed in? vercel whoami)"
+    ok "Vercel $target: $var"
+  done
+
+  if [[ -f "$app/.env.local" ]]; then
+    (
+      umask 077
+      grep -vE "^($(IFS='|'; echo "${vars[*]}"))=" "$app/.env.local" >"$app/.env.local.cx-new" || true
+      for var in "${vars[@]}"; do
+        printf '%s="%s"\n' "$var" "$(printf '%s\n' "$out" | sed -n "s/^$var=//p")" >>"$app/.env.local.cx-new"
+      done
+    )
+    mv "$app/.env.local.cx-new" "$app/.env.local"
+    ok ".env.local now has $name's object storage settings"
+  fi
+  say "Takes effect on the app's next deployment."
+}
+
 CMD=${1:-status}
 [[ $# -gt 0 ]] && shift
 case $CMD in
@@ -235,6 +278,7 @@ case $CMD in
     ;;
   dropbox-auth) cmd_dropbox_auth "$@" ;;
   point-vercel) cmd_point_vercel "$@" ;;
+  objects-vercel) cmd_objects_vercel "$@" ;;
   -h | --help | help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) die "Unknown command $CMD (see bin/remote.sh --help)" ;;
 esac

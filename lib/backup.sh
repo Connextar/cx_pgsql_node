@@ -292,7 +292,8 @@ _objects_measure() {
 _objects_prune_deleted() {
   local d cutoff removed=0
   cutoff=$(date -u -d "-$OBJECTS_BACKUP_KEEP_DELETED_DAYS days" +%F)
-  for d in $(rclone_x lsf --dirs-only cxcrypt:deleted 2>/dev/null | tr -d /); do
+  # Nothing has been deleted yet on a new store: no deleted/ folder, which lsf calls an error.
+  for d in $({ rclone_x lsf --dirs-only cxcrypt:deleted 2>/dev/null || true; } | tr -d /); do
     [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$d" < "$cutoff" ]] || continue
     rclone_x purge "cxcrypt:deleted/$d" && removed=$((removed + 1))
   done
