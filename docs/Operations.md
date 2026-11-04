@@ -69,7 +69,7 @@ Thresholds: `stack/health/README.md`; the main ones are in `config/server.env`.
 
 ## Maintenance windows
 
-The apps on this server read `https://psql-node-1.connextar.com/maintenance.json` (`@connextar/house/maintenance`):
+The apps on this server read `https://pgsql-node-1.connextar.com/maintenance.json` (`@connextar/house/maintenance`):
 from the moment a window is booked they show a dismissible **planned maintenance** notice with its times;
 from a minute before it starts they show a **maintenance page** instead of erroring, and APIs answer 503; the
 moment the window ends they come back by themselves (within about 15 s). The design and the feed's contract
