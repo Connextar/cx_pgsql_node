@@ -12,3 +12,6 @@ node_modules/
 *.log
 tests/.cache/
 tests/vps/root_authorized_keys
+
+# A report email built by bin/remote.sh report-preview.
+report-preview.html

@@ -94,6 +94,12 @@ into one query, where today each level is a separate query sent after the one ab
 took all 48 measured targets from 287 sequential trips to 193 and from 954 queries to 523: the family home
 page went 26 → 11. A pool of 30 instead of 10 saved only 1–3 trips on the heaviest pages.
 
+**What was done (2026-10-31).** `relationJoins` shipped in AltEd v0.151.2 (287 → 193 trips, 954 → 523
+queries). v0.151.3 asked the dashboard layout's four reads at once instead of in turn (193 → 163; light
+pages 4.4 → 2.2 trips). v0.152.1 made the Get started guide's dozen-plus checks one SQL query
+(163 → 155 trips, 523 → 411 queries), which also stopped them filling the app's pool of 10. A light
+dashboard page is now at the floor: one trip to read who's signed in, then one wave for everything else.
+
 ## 4. Backups
 
 - AltEd's encrypted dump: **410 MB**, almost all of it listing pictures (`listing_image.content`,

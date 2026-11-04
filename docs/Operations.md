@@ -14,6 +14,7 @@ Everything here runs on the server as root (`sudo -i`, or from your machine:
 | `cx-pgsql logs postgres` / `pgbouncer` / `health` | Container logs (Postgres also writes `$STACK_DIR/logs/postgres/`) |
 | `cx-pgsql backup status` | When each backup job last ran and how it went |
 | `fail2ban-client status cx-pgbouncer` | Banned addresses (also `sshd`, `cx-postgres`) |
+| `bin/remote.sh report-preview` | Tonight's report email, built now without sending, saved here as `report-preview.html` |
 
 When something is BROKEN, `bin/remote.sh apply` repairs it: each step re-applies only when its
 check fails, so a re-run is safe at any time.
@@ -27,6 +28,40 @@ Two independent alarms are worth having:
 2. **n8n** (`ENABLE_N8N=true`, `N8N_FQDN` pointed here): import `stack/n8n/cx-pgsql-health-watch.json`.
    It polls `/status` every 5 minutes and emails on any change of state, naming the failing checks
    (see `stack/n8n/README.md`). The token is `cx-pgsql secret show health-token`.
+
+## The nightly report email
+
+Every morning at 06:00 UTC (`REPORT_SCHEDULE`, after the 02:00 dumps and the 03:00 pgBackRest backup) the
+server emails `REPORT_TO` (`server-logs@connextar.com`) a summary of the last day, through Brevo's API
+(`steps/85-report.sh`, `lib/report.sh`, rendered by `stack/health/digest.mjs`):
+
+- **Needs attention** first: every warning or failed health check, a pending reboot, security updates,
+  slow app queries, failed backup runs, `FATAL`/`PANIC` log lines, deadlocks, restarted containers, a
+  disk or Dropbox filling up — then notes (statement errors, other updates, PgBouncer warnings).
+- **Server**: each disk (used / free / total), space by area (Postgres data, dumps, pgBackRest, object
+  store), uptime, load, memory, swap, updates waiting, reboot pending, certificate, SSH logins and
+  fail2ban per jail, every container's state.
+- **PostgreSQL**: version, connections, number of databases and each one's size (and change),
+  commits, cache hit; app queries, maintenance and monitoring queries, bulk copies; WAL written;
+  errors in the log grouped by message (values hidden); statements over `PG_LOG_MIN_DURATION_MS`;
+  the slow queries (over `REPORT_SLOW_MEAN_MS` on average) and where the database spent its time;
+  the largest tables.
+- **Backups**: each job's last success, its runs in the period (ok / failed), sizes, the restore test,
+  Dropbox space. **Object storage**: size, objects, capacity, each bucket and its change.
+- **All checks**: the health service's verdicts.
+
+Figures are the change since the last email that was sent (the counters are kept in
+`/var/lib/cx-pgsql/report/snapshot.json`, only after a send succeeds), so a missed night rolls into
+the next. Nothing that leaves the server carries row data: statement text is PostgreSQL's normalised
+form with literals masked, and log messages keep only schema names.
+
+- **Set up**: `bin/remote.sh brevo-auth` (asks for the API key, has Brevo check it, keeps it as a
+  root-only secret). `REPORT_FROM` must be a sender verified in Brevo; if Brevo restricts API keys to
+  known addresses, allow the server's IP there (Settings → Security → Authorised IPs).
+- **Now**: `bin/remote.sh cx report send`. **Without sending**: `bin/remote.sh report-preview`.
+- **If it stops**: the health service's `report_email` check warns (never fails) when the last email
+  errored or is over `REPORT_MAX_AGE_HOURS` (50) old, so `/healthz` and the n8n watch see it.
+- **Off**: `REPORT_ENABLED=false`, then `bin/remote.sh teardown report`.
 
 `/status` judges: connection use, disk, long and blocked queries, WAL archiving, backup ages (dumps,
 base backups, upload, verify), certificate expiry, transaction-ID wraparound and cache hit rate.
@@ -210,7 +245,7 @@ Generated on the server under `/etc/cx-pgsql/secrets/` (root only) and never ove
 `postgres-password`, `cx-monitor-password`, `pgbouncer-auth-password`, `health-token`,
 `pgbackrest-cipher-pass`, `db-<user>-password`, n8n's, and with objects: `objects-rpc-secret`,
 `objects-admin-token`, `objects-metrics-token`, `objects-crypt-pass`, `objects-crypt-salt` and each key's
-`objects-key-<name>-id` / `-secret`. Read one with
+`objects-key-<name>-id` / `-secret`, and `brevo-api-key` once the report email is set up. Read one with
 `cx-pgsql secret show <name>`. They are uploaded only inside the age-encrypted bundle.
 
 ## Tearing down

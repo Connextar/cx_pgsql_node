@@ -101,6 +101,7 @@ export function loadConfig(env = process.env) {
       objectsBackupMaxAgeHours: number('OBJECTS_BACKUP_MAX_AGE_HOURS', 3, { min: 0 }),
       warnObjectsCapacityPct: number('WARN_OBJECTS_CAPACITY_PCT', 50, { min: 0, max: 100 }),
       failObjectsCapacityPct: number('FAIL_OBJECTS_CAPACITY_PCT', 90, { min: 0, max: 100 }),
+      reportMaxAgeHours: number('REPORT_MAX_AGE_HOURS', 50, { min: 1 }),
     },
 
     cacheSeconds: number('CACHE_SECONDS', 15, { min: 0, max: 3600 }),

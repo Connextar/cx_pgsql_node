@@ -24,6 +24,10 @@
 #                                             here) and install the token on the server; with
 #                                             your own app, asks for its secret (or reads
 #                                             DROPBOX_CLIENT_SECRET)
+#   bin/remote.sh brevo-auth                  install the Brevo API key the nightly report email is
+#                                             sent with (asked for, not shown; or BREVO_API_KEY)
+#   bin/remote.sh report-preview [file.html]  build the email on the server without sending it and
+#                                             copy it here (default: report-preview.html, git-ignored)
 #
 # First run on a fresh VPS: connects as BOOTSTRAP_SSH_USER (root) on port 22 with your key;
 # afterwards as ADMIN_USER on SSH_PORT. Settings come from config/server.env.
@@ -179,6 +183,28 @@ cmd_dropbox_auth() {
     rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql backup dropbox-configure"
 }
 
+# The Brevo API key for the nightly report: asked for here (never an argument, never echoed), checked
+# against Brevo by the server, and kept there as a root-only secret.
+cmd_brevo_auth() {
+  local key=${BREVO_API_KEY:-}
+  if [[ -z "$key" ]]; then
+    read -rsp "Brevo API key (xkeysib-…, not shown): " key </dev/tty
+    echo
+  fi
+  [[ -n "$key" ]] || die "No API key given."
+  pick_target
+  printf '%s\n' "$key" | rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report brevo-configure"
+}
+
+# Build the report email on the server without sending it, and copy the HTML here to look at.
+cmd_report_preview() {
+  local file=${1:-report-preview.html}
+  pick_target
+  rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report preview" >&2
+  rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report html" >"$file"
+  ok "Saved $file ($(wc -c <"$file" | tr -d ' ') bytes) — open it in a browser"
+}
+
 # Point a Vercel app, and its .env.local, at one of this server's databases. The URLs carry the
 # password, so they go from the server into Vercel's stdin and the file without being printed.
 cmd_point_vercel() {
@@ -279,6 +305,8 @@ case $CMD in
   dropbox-auth) cmd_dropbox_auth "$@" ;;
   point-vercel) cmd_point_vercel "$@" ;;
   objects-vercel) cmd_objects_vercel "$@" ;;
+  brevo-auth) cmd_brevo_auth ;;
+  report-preview) cmd_report_preview "$@" ;;
   -h | --help | help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) die "Unknown command $CMD (see bin/remote.sh --help)" ;;
 esac

@@ -77,6 +77,7 @@ or an unreadable `*_FILE` stop the service at start-up with a message listing ev
 | `OBJECTS_BACKUP_MAX_AGE_HOURS` | `3` | Maximum age of the last successful off-site object copy (it runs hourly). |
 | `WARN_OBJECTS_CAPACITY_PCT` | `50` | `objects_capacity` warns at this % of the store's capacity… |
 | `FAIL_OBJECTS_CAPACITY_PCT` | `90` | …and fails at this %. |
+| `REPORT_MAX_AGE_HOURS` | `50` | With the nightly report email on (`report.enabled` in the status file), the `report_email` check warns when the last email is older than this. |
 | `CACHE_SECONDS` | `15` | Compute the report at most this often (`0` = on every request, still single-flight). |
 | `STATUS_INCLUDE_QUERY_TEXT` | `false` | `true` adds running-query text (200 chars, string literals masked) to `/status`. |
 
@@ -106,6 +107,7 @@ The process never crashes because PostgreSQL or PgBouncer is down.
 | `objects` | Only with `OBJECTS_HEALTH_URL`. fail unless Garage's `/health` answers 200 within 5 s (503 means the layout isn't applied or a partition is unavailable). | response ms |
 | `objects_capacity` | Only with `OBJECTS_HEALTH_URL`. `objects.bytes` ÷ `objects.capacity_bytes` from the status file (written by every objects backup run): warn ≥ `WARN_OBJECTS_CAPACITY_PCT`, fail ≥ `FAIL_OBJECTS_CAPACITY_PCT`; warn when nothing has been measured yet. | % used |
 | `backup_objects` | Only with `OBJECTS_HEALTH_URL`. `objects_backup` section (`OBJECTS_BACKUP_MAX_AGE_HOURS`); warn when `enabled: false` (no off-site copy at all). | hours since success |
+| `report_email` | Only when the status file's `report.enabled` is `true` (steps/85-report.sh). The backup-section rules with `REPORT_MAX_AGE_HOURS`, except that it **warns** where they would fail: a missed email is never a 503. | hours since success |
 | `status_file` | warn when the status file is missing, unreadable, larger than 1 MB or not a JSON object. | hours since `updated` |
 | `tls_cert` | warn ≤ `CERT_WARN_DAYS` left, fail ≤ `CERT_FAIL_DAYS`, expired, not yet valid or unreadable. | days left |
 | `cache_hit` | warn when a database with at least 10,000 block reads+hits has a shared-buffer hit ratio below `MIN_CACHE_HIT_PCT`. Never fails. | lowest % |
@@ -280,6 +282,17 @@ Metrics are left out (not reported as 0) when their source is unavailable.
 | `cx_health_report_timestamp_seconds` | | when the report was computed |
 
 Label values are escaped (`\\`, `\"`, `\n`) as the exposition format requires.
+
+## The nightly report (`digest.mjs`)
+
+`node digest.mjs` reads one JSON document of facts on stdin — this service's `/status`, host facts and
+superuser SQL gathered by the host's `lib/report.sh`, and the previous night's snapshot — and writes
+`{ status, subject, preheader, issues, html, text, snapshot }`. It opens no connections and writes no
+files; the host sends the email and keeps the snapshot. `src/digest.mjs` works out the changes since the
+snapshot and the issues; `src/digest-html.mjs` renders an email-client-safe HTML part (tables, inline
+styles, one 600 px column, dark-mode and narrow-screen rules that degrade quietly); `digestText` the plain
+part. Statement text goes through `maskSql`; Postgres log messages through `maskLogMessage`, which keeps
+the identifier after words like `constraint` or `relation` and hides every other quoted value and number.
 
 ## Running it
 

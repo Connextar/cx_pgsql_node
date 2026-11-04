@@ -19,6 +19,7 @@ test('defaults match the documented values', () => {
     backupMaxAgeHours: 26, uploadMaxAgeHours: 26, verifyMaxAgeHours: 192, walArchiveMaxAgeMinutes: 30,
     certWarnDays: 14, certFailDays: 3, minCacheHitPct: 90,
     objectsBackupMaxAgeHours: 3, warnObjectsCapacityPct: 50, failObjectsCapacityPct: 90,
+    reportMaxAgeHours: 50,
   });
   assert.deepEqual(cfg.objects, { healthUrl: '' });
   assert.equal(cfg.cacheSeconds, 15);

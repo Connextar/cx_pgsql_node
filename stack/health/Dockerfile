@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.mjs healthcheck.mjs ./
+COPY server.mjs healthcheck.mjs digest.mjs ./
 COPY src ./src
 
 # The image's built-in unprivileged user (uid/gid 1000). The application files stay root-owned and read-only to it.

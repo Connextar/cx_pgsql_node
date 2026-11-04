@@ -30,6 +30,11 @@
 #   cx-pgsql objects restore <bucket> [--deleted YYYY-MM-DD] [key...] | --all
 #                                             copy objects back from the encrypted off-site copy
 #
+#   cx-pgsql report preview                    build tonight's email without sending it (saved under
+#                                             /var/lib/cx-pgsql/report: last.html, last.txt)
+#   cx-pgsql report send | run                 build and send it now (run is what the timer does)
+#   cx-pgsql report brevo-configure            (the Brevo API key on stdin)
+#
 #   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
 set -Eeuo pipefail
 
@@ -39,7 +44,7 @@ export PROJECT_DIR
 LOG_FILE=/var/log/cx-pgsql.log
 # shellcheck source=../lib/core.sh
 source "$PROJECT_DIR/lib/core.sh"
-for _lib in tls dbconf pg backup restore objects; do
+for _lib in tls dbconf pg backup restore objects report; do
   # shellcheck source=/dev/null
   source "$PROJECT_DIR/lib/$_lib.sh"
 done
@@ -335,6 +340,16 @@ cmd_objects() {
   esac
 }
 
+cmd_report() {
+  case ${1:-} in
+    preview) rpt_run --no-send ;;
+    send | run) rpt_run ;;
+    brevo-configure) rpt_configure_brevo ;;
+    html) cat "$REPORT_STATE_DIR/last.html" ;;
+    *) die "report preview|send|run|brevo-configure|html" ;;
+  esac
+}
+
 case $1 in
   info) cmd_info ;;
   ps) _compose ps ;;
@@ -346,6 +361,7 @@ case $1 in
   backup) shift; cmd_backup "$@" ;;
   restore) shift; cmd_restore "$@" ;;
   objects) shift; cmd_objects "$@" ;;
+  report) shift; cmd_report "$@" ;;
   secret)
     [[ "${2:-}" == show && -n "${3:-}" ]] || die "cx-pgsql secret show <name>  (names: $(ls "$SECRETS_DIR" | tr '\n' ' '))"
     cat "$(secret_path "$3")"

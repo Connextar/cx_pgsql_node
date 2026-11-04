@@ -179,6 +179,12 @@ export function evaluateBackups(file, thresholds, now) {
   }
   checks.push(verify);
 
+  // The nightly report email (lib/report.sh). A missed email is worth knowing about, never a 503: warn at most.
+  if (data.report && typeof data.report === 'object' && data.report.enabled === true) {
+    const report = evaluateBackupSection('report_email', 'nightly report email', data.report, t.reportMaxAgeHours ?? 50, now);
+    checks.push(report.status === 'fail' ? makeCheck('report_email', 'warn', report.message, report.value) : report);
+  }
+
   const updated = parseTime(data.updated);
   const updatedHours = hoursSince(updated, now);
   checks.push(
@@ -195,6 +201,7 @@ export function evaluateBackups(file, thresholds, now) {
     upload: sectionAges(data.upload, now),
     verify: sectionAges(data.verify, now),
     objects: sectionAges(data.objects_backup, now),
+    report: sectionAges(data.report, now),
   };
   return { checks, section };
 }
