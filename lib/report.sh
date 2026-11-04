@@ -182,14 +182,14 @@ rpt_gather() { # → stdout
   local since
   since=$(rpt_since)
   jq -nc \
-    --arg at "$(now_iso)" --arg host "$SERVER_HOSTNAME" --arg fqdn "$SERVER_FQDN" \
+    --arg at "$(now_iso)" --arg hostname "$SERVER_HOSTNAME" --arg fqdn "$SERVER_FQDN" \
     --arg to "$REPORT_TO" --arg tz "${REPORT_TIMEZONE:-Europe/London}" --argjson slow "${REPORT_SLOW_MEAN_MS:-100}" \
     --arg ignore "${REPORT_IGNORE_USERS:-cx_monitor postgres}" \
     --slurpfile status <(rpt_status_json) \
     --slurpfile host <(rpt_host_json "$since") \
     --slurpfile sql <(rpt_sql_json) \
     --slurpfile prev <(cat "$REPORT_STATE_DIR/snapshot.json" 2>/dev/null || echo null) \
-    '{generated_at: $at, server: {hostname: $host, fqdn: $fqdn},
+    '{generated_at: $at, server: {hostname: $hostname, fqdn: $fqdn},
       config: {to: $to, timezone: $tz, slow_mean_ms: $slow, ignore_users: ($ignore | split(" ") | map(select(length > 0)))},
       status: $status[0], host: $host[0], sql: $sql[0], previous: $prev[0]}'
 }
