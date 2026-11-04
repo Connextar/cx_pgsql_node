@@ -137,7 +137,7 @@ ${rows([
   ['Memory', m.server.memory.total ? `${esc(formatBytes(m.server.memory.used))} of ${esc(formatBytes(m.server.memory.total))} ${small(`${m.server.memory.used_pct}%`)}` : null],
   ['Swap', m.server.swap.total ? `${esc(formatBytes(m.server.swap.used ?? 0))} of ${esc(formatBytes(m.server.swap.total))}` : null],
   ['Updates waiting', m.server.updates ? `${esc(m.server.updates.total)} ${small(`${m.server.updates.security} security`)}` : null],
-  ['Reboot pending', m.server.reboot_required ? pill('warn', 'Yes') : pill('ok', 'No')],
+  ['Reboot pending', m.server.reboot_required ? (m.server.reboot_scheduled ? `${pill('info', 'Booked')} ${small(esc(m.server.reboot_scheduled))}` : pill('warn', 'Yes')) : pill('ok', 'No')],
   ['TLS certificate', m.server.tls ? `${esc(m.server.tls.days_left)} days left` : null],
   ['SSH logins', m.server.ssh ? `${esc(formatCount(m.server.ssh.accepted))} accepted ${small(`${formatCount(m.server.ssh.failed)} failed`)}` : null],
   ...m.server.fail2ban.map((j) => [`fail2ban: ${j.jail}`, `${esc(formatCount(j.attempts ?? 0))} attempts ${small(`${j.banned_period} banned · ${j.banned_now} now`)}`]),

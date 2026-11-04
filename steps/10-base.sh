@@ -42,10 +42,13 @@ _base_auto_upgrades() {
 }
 
 _base_unattended_local() {
-  cat <<'EOF'
+  cat <<EOF
 // Managed by CX_PGSQL_Node_1 setup. Debian's own 50unattended-upgrades picks the origins
-// (security updates); this only says what happens afterwards.
-Unattended-Upgrade::Automatic-Reboot "false";
+// (security updates); this only says what happens afterwards. With AUTO_REBOOT, an update that
+// needs a reboot (a new kernel, libc) gets one at AUTO_REBOOT_TIME, server time (UTC) — never otherwise.
+Unattended-Upgrade::Automatic-Reboot "$(is_true "$AUTO_REBOOT" && echo true || echo false)";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "$AUTO_REBOOT_TIME";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 EOF
 }
@@ -90,7 +93,7 @@ base_check() {
   chk "locale $LOCALE" _base_locale_ok
   chk "sysstat collecting" _base_sysstat_ok
   chk_render "unattended-upgrades schedule" /etc/apt/apt.conf.d/20auto-upgrades _base_auto_upgrades
-  chk_render "unattended-upgrades never reboots" /etc/apt/apt.conf.d/52cx-unattended-upgrades _base_unattended_local
+  chk_render "unattended-upgrades reboots $(is_true "$AUTO_REBOOT" && echo "when needed at $AUTO_REBOOT_TIME UTC" || echo never)" /etc/apt/apt.conf.d/52cx-unattended-upgrades _base_unattended_local
   chk_render "sysctl settings" /etc/sysctl.d/90-cx.conf _base_sysctl
   chk "swappiness applied" test "$(cat /proc/sys/vm/swappiness)" = 10
   chk_render "journal capped at $JOURNAL_MAX_USE" /etc/systemd/journald.conf.d/90-cx.conf _base_journald

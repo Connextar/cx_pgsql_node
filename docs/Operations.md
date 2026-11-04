@@ -228,8 +228,11 @@ with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTAR
 
 ## Updates
 
-- **Debian**: security updates install themselves (unattended-upgrades); it never reboots. Check
-  `/var/run/reboot-required` now and then and reboot at a quiet moment (the stack starts by itself).
+- **Debian**: security updates install themselves (unattended-upgrades). When one needs a reboot (a new
+  kernel, libc), the server reboots at `AUTO_REBOOT_TIME` (23:00 UTC) that night, and only then; the stack
+  starts by itself, a minute or two down. `AUTO_REBOOT=false` turns that off: then the morning report warns
+  "a reboot is pending and nothing has booked it" until you reboot by hand. To book one yourself:
+  `sudo shutdown -r 23:00` (cancel with `sudo shutdown -c`); the report then shows it as booked.
 - **Postgres minor releases** (17.11 → 17.12), PgBouncer and pgBackRest come with the images. Rebuild
   from the latest base images and restart, at a quiet moment:
   ```bash

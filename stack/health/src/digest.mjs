@@ -211,7 +211,9 @@ export function buildDigest(input, nowArg) {
   const updates = isObj(host.updates) ? host.updates : null;
   if (host.reboot_required) {
     const why = Array.isArray(host.reboot_packages) && host.reboot_packages.length ? ` (for ${host.reboot_packages.slice(0, 4).join(', ')})` : '';
-    issue('warn', 'Server', `A reboot is pending${why}.`);
+    // Already booked (AUTO_REBOOT, or by hand): a note, not a warning.
+    if (host.reboot_scheduled) issue('info', 'Server', `A reboot is pending${why} and booked for ${formatWhen(host.reboot_scheduled, cfg.timezone)}.`);
+    else issue('warn', 'Server', `A reboot is pending${why} and nothing has booked it.`);
   }
   if (updates && n(updates.security) > 0) issue('warn', 'Server', `${updates.security} security update${updates.security === 1 ? '' : 's'} waiting.`);
   else if (updates && n(updates.total) > 0) issue('info', 'Server', `${updates.total} package update${updates.total === 1 ? '' : 's'} waiting (none marked security).`);
@@ -474,6 +476,7 @@ export function buildDigest(input, nowArg) {
       usage_delta: usageDelta(host.usage, prev?.usage),
       updates,
       reboot_required: Boolean(host.reboot_required),
+      reboot_scheduled: host.reboot_scheduled ? formatWhen(host.reboot_scheduled, cfg.timezone) : null,
       containers,
       ssh,
       fail2ban: jails,
@@ -593,7 +596,7 @@ export function digestText({ model, subject }) {
   for (const f of m.server.filesystems) kv(`Disk ${f.mount}`, `${formatBytes(f.used)} used, ${formatBytes(f.free)} free of ${formatBytes(f.size)} (${f.used_pct}%)`);
   for (const [k, v] of Object.entries(USAGE_LABELS)) kv(v, m.server.usage[k] !== undefined ? withDelta(formatBytes(m.server.usage[k]), m.server.usage_delta[k]) : null);
   kv('Updates waiting', m.server.updates ? `${m.server.updates.total} (${m.server.updates.security} security)` : null);
-  kv('Reboot pending', m.server.reboot_required ? 'yes' : 'no');
+  kv('Reboot pending', m.server.reboot_required ? `yes${m.server.reboot_scheduled ? `, booked for ${m.server.reboot_scheduled}` : ''}` : 'no');
   kv('TLS certificate', m.server.tls ? `${m.server.tls.days_left} days left` : null);
   kv('SSH', m.server.ssh ? `${formatCount(m.server.ssh.failed)} failed logins, ${formatCount(m.server.ssh.accepted)} accepted` : null);
   for (const j of m.server.fail2ban) kv(`fail2ban ${j.jail}`, `${formatCount(j.attempts ?? 0)} attempts seen, ${j.banned_period} banned (${j.banned_now} now)`);

@@ -100,6 +100,13 @@ _rpt_fail2ban() { # since
   done | jq -sc .
 }
 
+# A reboot already booked (shutdown -r <time>, or unattended-upgrades' Automatic-Reboot-Time): when, in UTC.
+_rpt_reboot_scheduled() {
+  local usec
+  usec=$(sed -n 's/^USEC=//p' /run/systemd/shutdown/scheduled 2>/dev/null || true)
+  [[ -n "$usec" ]] && date -u -d "@$((usec / 1000000))" +%Y-%m-%dT%H:%M:%SZ || true
+}
+
 _rpt_containers() {
   local ids
   ids=$(docker ps -aq --filter "name=^${STACK_NAME}-" 2>/dev/null)
@@ -140,6 +147,7 @@ rpt_host_json() { # since
     --argjson updates "$(_rpt_updates)" \
     --argjson reboot "$([[ -f /var/run/reboot-required ]] && echo true || echo false)" \
     --argjson rpkgs "$( (cat /var/run/reboot-required.pkgs 2>/dev/null || true) | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')" \
+    --arg rat "$(_rpt_reboot_scheduled)" \
     --argjson containers "$(_rpt_containers)" \
     --argjson jobs "$(_rpt_jobs "$since")" \
     --argjson f2b "$(_rpt_fail2ban "$since")" \
@@ -148,7 +156,7 @@ rpt_host_json() { # since
     --argjson bouncer "$(_rpt_pgbouncer_log "$since")" \
     --argjson dropbox "$(_rpt_dropbox)" \
     '{os: $os, kernel: $kernel, uptime_seconds: $up, cpu_count: $cpus, filesystems: $fs, usage: $usage, updates: $updates,
-      reboot_required: $reboot, reboot_packages: $rpkgs, containers: $containers, jobs: $jobs,
+      reboot_required: $reboot, reboot_packages: $rpkgs, reboot_scheduled: (if $rat == "" then null else $rat end), containers: $containers, jobs: $jobs,
       ssh: {accepted: $accepted, failed: ([$f2b[] | select(.jail == "sshd") | .attempts] | add // 0)},
       fail2ban: $f2b, pg_log: $pglog, pgbouncer_log: $bouncer, dropbox: $dropbox}'
 }

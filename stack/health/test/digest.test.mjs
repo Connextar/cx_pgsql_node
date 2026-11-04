@@ -112,7 +112,7 @@ test('slow app queries, a pending reboot, security updates and FATAL lines are w
   );
   assert.equal(d.status, 'warn');
   const texts = d.issues.map((i) => `${i.severity} ${i.area}: ${i.text}`);
-  assert.ok(texts.some((t) => /^warn Server: A reboot is pending \(for linux-image-6\.12\)/.test(t)), texts.join('\n'));
+  assert.ok(texts.some((t) => /^warn Server: A reboot is pending \(for linux-image-6\.12\) and nothing has booked it/.test(t)), texts.join('\n'));
   assert.ok(texts.some((t) => /^warn Server: 1 security update waiting/.test(t)));
   assert.ok(texts.some((t) => /^warn Slow queries: app: 300 ms on average over 10 calls/.test(t)));
   assert.ok(texts.some((t) => /^warn PostgreSQL log: 2 FATAL lines/.test(t)));
@@ -203,4 +203,13 @@ test('bulk COPY (pg_dump, imports) is counted apart and never called slow; a dro
   assert.deepEqual(d.model.postgres.statements.slow, []);
   assert.equal(d.model.postgres.statements.totals.bulk_calls, 1);
   assert.equal(d.model.postgres.statements.top_total[0].database, '(dropped database)');
+});
+
+test('a pending reboot that is already booked is a note with its time, not a warning', () => {
+  const d = buildDigest(input({ host: { reboot_required: true, reboot_packages: ['linux-image-6.12'], reboot_scheduled: '2026-11-04T23:00:00Z' } }), NOW);
+  assert.equal(d.status, 'ok');
+  const note = d.issues.find((i) => i.area === 'Server' && /reboot/.test(i.text));
+  assert.equal(note.severity, 'info');
+  assert.match(note.text, /booked for Wed 4 Nov 2026, 23:00 GMT/);
+  assert.match(digestHtml(d), />Booked</);
 });
