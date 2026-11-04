@@ -33,6 +33,8 @@
 #   cx-pgsql report preview                    build tonight's email without sending it (saved under
 #                                             /var/lib/cx-pgsql/report: last.html, last.txt)
 #   cx-pgsql report send | run                 build and send it now (run is what the timer does)
+#   cx-pgsql report reboot-notice [--preview]  email that a reboot is booked, moved or cancelled (the
+#                                             path unit does this by itself; --preview only builds it)
 #   cx-pgsql report brevo-configure            (the Brevo API key on stdin)
 #
 #   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
@@ -345,8 +347,9 @@ cmd_report() {
     preview) rpt_run --no-send ;;
     send | run) rpt_run ;;
     brevo-configure) rpt_configure_brevo ;;
-    html) cat "$REPORT_STATE_DIR/last.html" ;;
-    *) die "report preview|send|run|brevo-configure|html" ;;
+    reboot-notice) shift; rpt_reboot_notice "$@" ;;
+    html) if [[ "${2:-}" == notice ]]; then cat "$REPORT_STATE_DIR/notice.html"; else cat "$REPORT_STATE_DIR/last.html"; fi ;;
+    *) die "report preview|send|run|reboot-notice [--preview]|brevo-configure|html [notice]" ;;
   esac
 }
 

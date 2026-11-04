@@ -233,6 +233,13 @@ with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTAR
   starts by itself, a minute or two down. `AUTO_REBOOT=false` turns that off: then the morning report warns
   "a reboot is pending and nothing has booked it" until you reboot by hand. To book one yourself:
   `sudo shutdown -r 23:00` (cancel with `sudo shutdown -c`); the report then shows it as booked.
+- **Planned-downtime email** (`REBOOT_NOTICE`, on with the report): the moment a reboot or power-off is
+  booked — by unattended-upgrades or by hand — `REBOOT_NOTICE_TO` (default `REPORT_TO`) gets an email: when
+  (London time and UTC), expected downtime (the last reboot's measured gap plus a minute for Postgres), the
+  updates that need it, what's unavailable meanwhile, how to cancel or move it. Moving or cancelling it sends
+  another; nothing is sent twice. `cx-reboot-notice.path` watches `/run/systemd/shutdown`, a timer at :05 and
+  :35 catches anything missed and retries a failed send. See it without sending: `bin/remote.sh report-preview
+  --notice`. The morning report shows the last reboot and how long the server was off.
 - **Postgres minor releases** (17.11 → 17.12), PgBouncer and pgBackRest come with the images. Rebuild
   from the latest base images and restart, at a quiet moment:
   ```bash

@@ -477,6 +477,9 @@ export function buildDigest(input, nowArg) {
       updates,
       reboot_required: Boolean(host.reboot_required),
       reboot_scheduled: host.reboot_scheduled ? formatWhen(host.reboot_scheduled, cfg.timezone) : null,
+      last_reboot: isObj(host.last_reboot) && host.last_reboot.at
+        ? { at: formatWhen(host.last_reboot.at, cfg.timezone), offline_seconds: n(host.last_reboot.offline_seconds) }
+        : null,
       containers,
       ssh,
       fail2ban: jails,
@@ -596,6 +599,7 @@ export function digestText({ model, subject }) {
   for (const f of m.server.filesystems) kv(`Disk ${f.mount}`, `${formatBytes(f.used)} used, ${formatBytes(f.free)} free of ${formatBytes(f.size)} (${f.used_pct}%)`);
   for (const [k, v] of Object.entries(USAGE_LABELS)) kv(v, m.server.usage[k] !== undefined ? withDelta(formatBytes(m.server.usage[k]), m.server.usage_delta[k]) : null);
   kv('Updates waiting', m.server.updates ? `${m.server.updates.total} (${m.server.updates.security} security)` : null);
+  kv('Last reboot', m.server.last_reboot ? `${m.server.last_reboot.at}, offline ${m.server.last_reboot.offline_seconds} s` : null);
   kv('Reboot pending', m.server.reboot_required ? `yes${m.server.reboot_scheduled ? `, booked for ${m.server.reboot_scheduled}` : ''}` : 'no');
   kv('TLS certificate', m.server.tls ? `${m.server.tls.days_left} days left` : null);
   kv('SSH', m.server.ssh ? `${formatCount(m.server.ssh.failed)} failed logins, ${formatCount(m.server.ssh.accepted)} accepted` : null);

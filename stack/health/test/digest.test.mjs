@@ -213,3 +213,9 @@ test('a pending reboot that is already booked is a note with its time, not a war
   assert.match(note.text, /booked for Wed 4 Nov 2026, 23:00 GMT/);
   assert.match(digestHtml(d), />Booked</);
 });
+
+test('the last reboot shows when and how long the server was off', () => {
+  const d = buildDigest(input({ host: { last_reboot: { at: '2026-11-04T23:00:52Z', offline_seconds: 9 } } }), NOW);
+  assert.deepEqual(d.model.server.last_reboot, { at: 'Wed 4 Nov 2026, 23:00 GMT', offline_seconds: 9 });
+  assert.match(digestText(d), /Last reboot +Wed 4 Nov 2026, 23:00 GMT, offline 9 s/);
+});

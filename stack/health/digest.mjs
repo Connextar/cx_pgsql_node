@@ -1,9 +1,11 @@
-// The nightly report's renderer: one JSON document of facts on stdin (lib/report.sh gathers them), one JSON
+// The nightly report's renderer (and, with the argument `notice`, the planned-reboot notice's — src/notice.mjs):
+// one JSON document of facts on stdin (lib/report.sh gathers them), one JSON
 // document out: { status, subject, preheader, issues, html, text, snapshot }. Runs inside the health container
 // (`docker exec -i cx-pgsql-health node /app/digest.mjs`), so it needs nothing the image doesn't have; it opens
 // no connections and writes nothing — sending, and keeping the snapshot for tomorrow, are the host's job.
 import { buildDigest, digestText } from './src/digest.mjs';
 import { digestHtml } from './src/digest-html.mjs';
+import { rebootNotice } from './src/notice.mjs';
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -14,6 +16,11 @@ try {
 } catch (err) {
   process.stderr.write(`digest: stdin is not JSON (${err.message})\n`);
   process.exit(2);
+}
+
+if (process.argv[2] === 'notice') {
+  process.stdout.write(JSON.stringify(rebootNotice(input)));
+  process.exit(0);
 }
 
 const digest = buildDigest(input);

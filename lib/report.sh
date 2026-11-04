@@ -107,6 +107,14 @@ _rpt_reboot_scheduled() {
   [[ -n "$usec" ]] && date -u -d "@$((usec / 1000000))" +%Y-%m-%dT%H:%M:%SZ || true
 }
 
+# The last reboot, from the journal: when the machine came back, and how long it was off (the previous
+# boot's last entry to this one's first). Null when the journal holds only one boot.
+_rpt_last_reboot() {
+  journalctl --list-boots -o json 2>/dev/null |
+    jq -c 'if length >= 2 then {at: (.[-1].first_entry / 1000000 | floor | todate),
+             offline_seconds: ((.[-1].first_entry - .[-2].last_entry) / 1000000 | floor)} else null end' 2>/dev/null || echo null
+}
+
 _rpt_containers() {
   local ids
   ids=$(docker ps -aq --filter "name=^${STACK_NAME}-" 2>/dev/null)
@@ -148,6 +156,7 @@ rpt_host_json() { # since
     --argjson reboot "$([[ -f /var/run/reboot-required ]] && echo true || echo false)" \
     --argjson rpkgs "$( (cat /var/run/reboot-required.pkgs 2>/dev/null || true) | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')" \
     --arg rat "$(_rpt_reboot_scheduled)" \
+    --argjson lastboot "$(_rpt_last_reboot)" \
     --argjson containers "$(_rpt_containers)" \
     --argjson jobs "$(_rpt_jobs "$since")" \
     --argjson f2b "$(_rpt_fail2ban "$since")" \
@@ -156,7 +165,7 @@ rpt_host_json() { # since
     --argjson bouncer "$(_rpt_pgbouncer_log "$since")" \
     --argjson dropbox "$(_rpt_dropbox)" \
     '{os: $os, kernel: $kernel, uptime_seconds: $up, cpu_count: $cpus, filesystems: $fs, usage: $usage, updates: $updates,
-      reboot_required: $reboot, reboot_packages: $rpkgs, reboot_scheduled: (if $rat == "" then null else $rat end), containers: $containers, jobs: $jobs,
+      reboot_required: $reboot, reboot_packages: $rpkgs, reboot_scheduled: (if $rat == "" then null else $rat end), last_reboot: $lastboot, containers: $containers, jobs: $jobs,
       ssh: {accepted: $accepted, failed: ([$f2b[] | select(.jail == "sshd") | .attempts] | add // 0)},
       fail2ban: $f2b, pg_log: $pglog, pgbouncer_log: $bouncer, dropbox: $dropbox}'
 }
@@ -206,15 +215,15 @@ rpt_render() { # input file → stdout
   docker exec -i "$HEALTH_CONTAINER" node /app/digest.mjs <"$1"
 }
 
-# POST the email to Brevo. Prints Brevo's messageId; dies with Brevo's own message on failure.
-rpt_send() { # digest file
-  local digest=$1 body out code key
+# POST the email to Brevo. Prints Brevo's messageId; on failure prints Brevo's own message and returns 1.
+rpt_send() { # digest file [tag] [to]
+  local digest=$1 tag=${2:-server-report} to=${3:-$REPORT_TO} body out code key
   key=$(secret_path brevo-api-key)
   body=$(mktemp "$REPORT_STATE_DIR/send.XXXXXX")
   out=$(mktemp "$REPORT_STATE_DIR/answer.XXXXXX")
-  jq -c --arg to "$REPORT_TO" --arg from "$REPORT_FROM" --arg name "${REPORT_FROM_NAME:-$SERVER_HOSTNAME}" \
+  jq -c --arg to "$to" --arg from "$REPORT_FROM" --arg name "${REPORT_FROM_NAME:-$SERVER_HOSTNAME}" --arg tag "$tag" \
     '{sender: {name: $name, email: $from}, to: ($to | split(",") | map(gsub("^ +| +$"; "") | select(length > 0) | {email: .})),
-      subject, htmlContent: .html, textContent: .text, tags: ["server-report"]}' "$digest" >"$body"
+      subject, htmlContent: .html, textContent: .text, tags: [$tag]}' "$digest" >"$body"
   code=$(printf 'api-key: %s\n' "$(cat "$key")" |
     curl -sS --max-time 60 -o "$out" -w '%{http_code}' -H @- -H 'content-type: application/json' -H 'accept: application/json' \
       --data-binary @"$body" "$BREVO_API/smtp/email" 2>&1) || code=${code:-000}
@@ -295,3 +304,79 @@ rpt_configure_brevo() {
   _log "SECRET installed brevo-api-key"
   ok "Saved as a root-only secret. Send a report now with:  cx-pgsql report send"
 }
+
+# ─── Planned-downtime notice ────────────────────────────────────────────────────────
+# A reboot (or power-off) booked with `shutdown -r <time>` — by hand, or by unattended-upgrades'
+# Automatic-Reboot-Time — leaves /run/systemd/shutdown/scheduled. cx-reboot-notice.path runs this the moment
+# that changes (and a half-hourly timer as a safety net): one email per booking, another if it moves or is
+# cancelled. What was announced is kept in reboot-notice.json; /run is emptied by the reboot itself.
+REBOOT_SCHEDULE_FILE=/run/systemd/shutdown/scheduled
+
+rpt_reboot_notice() { # [--preview]
+  local preview=0 state="$REPORT_STATE_DIR/reboot-notice.json" usec mode reason prev_usec now kind at="" prev_at="" input digest id
+  [[ "${1:-}" == --preview ]] && preview=1
+  rpt_lock
+  install -d -m 0700 "$REPORT_STATE_DIR"
+  usec=$(sed -n 's/^USEC=//p' "$REBOOT_SCHEDULE_FILE" 2>/dev/null || true)
+  mode=$(sed -n 's/^MODE=//p' "$REBOOT_SCHEDULE_FILE" 2>/dev/null || true)
+  reason=$(sed -n 's/^WALL_MESSAGE=//p' "$REBOOT_SCHEDULE_FILE" 2>/dev/null || true)
+  reason=$(printf '%b' "$reason")
+  prev_usec=$(jq -r '.usec // empty' "$state" 2>/dev/null || true)
+  now=$(date +%s)
+
+  if [[ -z "$usec" ]]; then
+    if ((preview)); then
+      # Nothing booked: show what tonight's automatic reboot would announce.
+      usec=$(($(date -u -d "today ${AUTO_REBOOT_TIME:-23:00}" +%s) * 1000000))
+      ((usec / 1000000 > now)) || usec=$(($(date -u -d "tomorrow ${AUTO_REBOOT_TIME:-23:00}" +%s) * 1000000))
+      kind=booked mode=reboot
+    elif [[ -n "$prev_usec" ]] && ((prev_usec / 1000000 > now + 60)); then
+      kind=cancelled # announced, still in the future, and gone: cancelled (not the reboot happening)
+    else
+      rm -f "$state"
+      return 0
+    fi
+  elif [[ "$usec" == "$prev_usec" ]] && ((!preview)); then
+    return 0 # already announced
+  elif [[ -n "$prev_usec" ]] && ((prev_usec / 1000000 > now)); then
+    kind=moved
+  else
+    kind=booked
+  fi
+  case $mode in poweroff | halt) mode=poweroff ;; *) mode=reboot ;; esac
+  [[ -n "$usec" ]] && at=$(date -u -d "@$((usec / 1000000))" +%Y-%m-%dT%H:%M:%SZ)
+  [[ -n "$prev_usec" ]] && prev_at=$(date -u -d "@$((prev_usec / 1000000))" +%Y-%m-%dT%H:%M:%SZ)
+
+  input=$(mktemp "$REPORT_STATE_DIR/notice-input.XXXXXX")
+  digest=$(mktemp "$REPORT_STATE_DIR/notice.XXXXXX")
+  jq -nc --arg host "$SERVER_HOSTNAME" --arg fqdn "$SERVER_FQDN" --arg tz "${REPORT_TIMEZONE:-Europe/London}" \
+    --arg kind "$kind" --arg mode "$mode" --arg at "$at" --arg prev "$prev_at" --arg reason "$reason" \
+    --argjson pkgs "$( (cat /var/run/reboot-required.pkgs 2>/dev/null || true) | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')" \
+    --argjson last "$(_rpt_last_reboot)" \
+    --argjson dbs "$(pg_sql -At -d postgres -c "SELECT coalesce(json_agg(datname ORDER BY datname), '[]') FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'" 2>/dev/null || echo '[]')" \
+    --argjson objects "$(is_true "$ENABLE_OBJECTS" && echo true || echo false)" \
+    '{server: {hostname: $host, fqdn: $fqdn}, timezone: $tz,
+      notice: {kind: $kind, mode: $mode, at: (if $at == "" then null else $at end), previous_at: (if $prev == "" then null else $prev end),
+               reason: (if $reason == "" then null else $reason end), packages: $pkgs, last_reboot: $last, databases: $dbs, objects: $objects}}' >"$input"
+  if ! docker exec -i "$HEALTH_CONTAINER" node /app/digest.mjs notice <"$input" >"$digest" || ! jq -e .subject "$digest" >/dev/null 2>&1; then
+    rm -f "$input" "$digest"
+    die "The reboot notice could not be built (is $HEALTH_CONTAINER running?) — the timer tries again."
+  fi
+  rm -f "$input"
+  jq -r .html "$digest" >"$REPORT_STATE_DIR/notice.html"
+  if ((preview)); then
+    info "Built, not sent: $(jq -r .subject "$digest")"
+    rm -f "$digest"
+    return 0
+  fi
+  if id=$(rpt_send "$digest" server-reboot "${REBOOT_NOTICE_TO:-$REPORT_TO}"); then
+    if [[ $kind == cancelled ]]; then rm -f "$state"; else jq -nc --arg u "$usec" --arg at "$at" --arg k "$kind" '{usec: $u, at: $at, kind: $k}' >"$state"; fi
+    status_update '.reboot_notice = {last_sent: $now, kind: $k, at: (if $at == "" then null else $at end)}' --arg k "$kind" --arg at "$at"
+    ok "Reboot notice ($kind) sent to ${REBOOT_NOTICE_TO:-$REPORT_TO}: $(jq -r .subject "$digest") [$id]"
+    rm -f "$digest"
+  else
+    rm -f "$digest"
+    die "Reboot notice not sent: $id — the timer tries again."
+  fi
+}
+

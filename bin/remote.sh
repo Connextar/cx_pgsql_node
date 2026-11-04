@@ -26,8 +26,10 @@
 #                                             DROPBOX_CLIENT_SECRET)
 #   bin/remote.sh brevo-auth                  install the Brevo API key the nightly report email is
 #                                             sent with (asked for, not shown; or BREVO_API_KEY)
-#   bin/remote.sh report-preview [file.html]  build the email on the server without sending it and
-#                                             copy it here (default: report-preview.html, git-ignored)
+#   bin/remote.sh report-preview [--notice] [file.html]
+#                                             build the email on the server without sending it and
+#                                             copy it here (default: report-preview.html, git-ignored);
+#                                             --notice: the planned-reboot notice instead
 #
 # First run on a fresh VPS: connects as BOOTSTRAP_SSH_USER (root) on port 22 with your key;
 # afterwards as ADMIN_USER on SSH_PORT. Settings come from config/server.env.
@@ -198,10 +200,17 @@ cmd_brevo_auth() {
 
 # Build the report email on the server without sending it, and copy the HTML here to look at.
 cmd_report_preview() {
-  local file=${1:-report-preview.html}
+  local notice=0 file
+  [[ "${1:-}" == --notice ]] && { notice=1; shift; }
+  file=${1:-report-preview.html}
   pick_target
-  rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report preview" >&2
-  rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report html" >"$file"
+  if ((notice)); then
+    rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report reboot-notice --preview" >&2
+    rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report html notice" >"$file"
+  else
+    rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report preview" >&2
+    rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql report html" >"$file"
+  fi
   ok "Saved $file ($(wc -c <"$file" | tr -d ' ') bytes) — open it in a browser"
 }
 

@@ -4,7 +4,7 @@
 // status also has a word), and a <style> block only for what can degrade — dark mode and narrow screens.
 import { formatBytes, formatCount, formatDeltaBytes, formatMs, USAGE_LABELS, withDelta } from './digest.mjs';
 
-const C = {
+export const C = {
   page: '#eef0f3',
   card: '#ffffff',
   text: '#111827',
@@ -17,7 +17,7 @@ const C = {
   fail: { fg: '#991b1b', bg: '#fee2e2', bar: '#dc2626', band: '#b91c1c' },
   info: { fg: '#1e40af', bg: '#dbeafe', bar: '#3b82f6', band: '#1d4ed8' },
 };
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+export const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 const MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace";
 const WORD = { ok: 'OK', warn: 'Warning', fail: 'Problem', info: 'Note' };
 
@@ -30,7 +30,7 @@ export function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
-const pill = (status, text = WORD[status]) =>
+export const pill = (status, text = WORD[status]) =>
   `<span class="pill-${status}" style="display:inline-block;font-family:${FONT};padding:2px 8px;border-radius:10px;background:${C[status].bg};color:${C[status].fg};font-size:12px;font-weight:600;line-height:18px;white-space:nowrap;">${esc(text)}</span>`;
 
 /** A usage bar: a two-cell table, which Outlook draws as faithfully as anyone. */
@@ -45,7 +45,7 @@ ${p < 100 ? `<td class="bar-track" height="8" style="background:${C.track};heigh
 
 const usageStatus = (p) => (p >= 90 ? 'fail' : p >= 80 ? 'warn' : 'ok');
 
-function section(title, body, subtitle) {
+export function section(title, body, subtitle) {
   return `<tr><td class="card" style="background:${C.card};padding:20px 24px 8px;border-top:1px solid ${C.line};">
 <h2 class="h2" style="margin:0 0 ${subtitle ? '2px' : '10px'};font-family:${FONT};font-size:17px;line-height:24px;color:${C.text};font-weight:700;">${esc(title)}</h2>
 ${subtitle ? `<p class="muted" style="margin:0 0 10px;font-family:${FONT};font-size:13px;line-height:18px;color:${C.muted};">${esc(subtitle)}</p>` : ''}
@@ -54,7 +54,7 @@ ${body}
 }
 
 /** Label/value rows. Values are pre-escaped HTML. */
-function rows(pairs) {
+export function rows(pairs) {
   const body = pairs
     .filter(([, v]) => v !== null && v !== undefined && v !== '')
     .map(
@@ -75,7 +75,7 @@ function code(text) {
   return `<div class="mono" style="margin:4px 0 0;padding:6px 8px;background:${C.mono};border-radius:4px;font-family:${MONO};font-size:12px;line-height:17px;color:${C.text};word-break:break-all;overflow-wrap:anywhere;">${esc(text)}</div>`;
 }
 
-const small = (html) => `<span class="muted" style="color:${C.muted};font-size:13px;">${html}</span>`;
+export const small = (html) => `<span class="muted" style="color:${C.muted};font-size:13px;">${html}</span>`;
 
 /** A 2×2 grid of headline numbers. Two columns stay readable down to 320px. */
 function tiles(items) {
@@ -137,6 +137,7 @@ ${rows([
   ['Memory', m.server.memory.total ? `${esc(formatBytes(m.server.memory.used))} of ${esc(formatBytes(m.server.memory.total))} ${small(`${m.server.memory.used_pct}%`)}` : null],
   ['Swap', m.server.swap.total ? `${esc(formatBytes(m.server.swap.used ?? 0))} of ${esc(formatBytes(m.server.swap.total))}` : null],
   ['Updates waiting', m.server.updates ? `${esc(m.server.updates.total)} ${small(`${m.server.updates.security} security`)}` : null],
+  ['Last reboot', m.server.last_reboot ? `${esc(m.server.last_reboot.at)} ${small(`offline ${m.server.last_reboot.offline_seconds} s`)}` : null],
   ['Reboot pending', m.server.reboot_required ? (m.server.reboot_scheduled ? `${pill('info', 'Booked')} ${small(esc(m.server.reboot_scheduled))}` : pill('warn', 'Yes')) : pill('ok', 'No')],
   ['TLS certificate', m.server.tls ? `${esc(m.server.tls.days_left)} days left` : null],
   ['SSH logins', m.server.ssh ? `${esc(formatCount(m.server.ssh.accepted))} accepted ${small(`${formatCount(m.server.ssh.failed)} failed`)}` : null],
@@ -251,6 +252,29 @@ ${rows(o.buckets.map((b) => [b.name, `${esc(formatBytes(b.bytes))} ${small(`${fo
     { label: 'Backups', value: `${backupsOk} of ${m.backups.rows.length} OK`, sub: m.backups.dropbox ? esc(`${formatBytes(m.backups.dropbox.free)} free in Dropbox`) : '&nbsp;', status: backupStatus },
   ].filter(Boolean);
 
+  return emailPage({
+    subject,
+    preheader,
+    band,
+    kicker: `${m.server.hostname} · nightly report`,
+    title: `${m.overall === 'ok' ? '✓' : m.overall === 'warn' ? '!' : '✕'} ${statusWord}`,
+    subtitle: `${m.generated_local}${m.previous_local ? ` · covering the ${m.period_hours} h since ${m.previous_local}` : ' · first report: totals since statistics began'}`,
+    body: `<tr><td class="card" style="background:${C.card};padding:18px 24px 8px;">${tiles(tileItems)}</td></tr>
+${section('Needs attention', issues)}
+${server}
+${postgres}
+${backups}
+${objects}
+${checks}`,
+    footer: `Sent by ${esc(m.server.hostname)} (CX_PGSQL_Node_1) at ${esc(m.generated_local)}. Query text is normalised by PostgreSQL and every literal is masked; log messages have their values hidden. Live status: <span style="white-space:nowrap;">cx-pgsql health</span> on the server.`,
+  });
+}
+
+/**
+ * The frame every email from this server shares: head, a coloured band with the headline, the body rows
+ * (`section()` output), a footer. Text arguments are escaped here; `body` and `footer` are HTML.
+ */
+export function emailPage({ subject, preheader, band, kicker, title, subtitle, body, footer }) {
   return `<!DOCTYPE html>
 <html lang="en-GB" xmlns="http://www.w3.org/1999/xhtml">
 <head>
@@ -289,19 +313,13 @@ ${rows(o.buckets.map((b) => [b.name, `${esc(formatBytes(b.bytes))} ${small(`${fo
 <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;border-radius:10px;overflow:hidden;">
 <tr><td class="head" style="background:${band};padding:22px 24px;">
-<p style="margin:0;font-family:${FONT};font-size:13px;line-height:18px;color:#ffffff;opacity:.9;">${esc(m.server.hostname)} · nightly report</p>
-<h1 style="margin:4px 0 0;font-family:${FONT};font-size:24px;line-height:30px;color:#ffffff;font-weight:700;">${m.overall === 'ok' ? '✓' : m.overall === 'warn' ? '!' : '✕'} ${esc(statusWord)}</h1>
-<p style="margin:6px 0 0;font-family:${FONT};font-size:13px;line-height:18px;color:#ffffff;opacity:.9;">${esc(m.generated_local)}${m.previous_local ? ` · covering the ${m.period_hours} h since ${esc(m.previous_local)}` : ' · first report: totals since statistics began'}</p>
+<p style="margin:0;font-family:${FONT};font-size:13px;line-height:18px;color:#ffffff;opacity:.9;">${esc(kicker)}</p>
+<h1 style="margin:4px 0 0;font-family:${FONT};font-size:24px;line-height:30px;color:#ffffff;font-weight:700;">${esc(title)}</h1>
+<p style="margin:6px 0 0;font-family:${FONT};font-size:13px;line-height:18px;color:#ffffff;opacity:.9;">${esc(subtitle)}</p>
 </td></tr>
-<tr><td class="card" style="background:${C.card};padding:18px 24px 8px;">${tiles(tileItems)}</td></tr>
-${section('Needs attention', issues)}
-${server}
-${postgres}
-${backups}
-${objects}
-${checks}
+${body}
 <tr><td class="card" style="background:${C.card};padding:16px 24px 22px;border-top:1px solid ${C.line};">
-<p class="muted" style="margin:0;font-family:${FONT};font-size:12px;line-height:17px;color:${C.muted};">Sent by ${esc(m.server.hostname)} (CX_PGSQL_Node_1) at ${esc(m.generated_local)}. Query text is normalised by PostgreSQL and every literal is masked; log messages have their values hidden. Live status: <span style="white-space:nowrap;">cx-pgsql health</span> on the server.</p>
+<p class="muted" style="margin:0;font-family:${FONT};font-size:12px;line-height:17px;color:${C.muted};">${footer}</p>
 </td></tr>
 </table>
 <!--[if mso]></td></tr></table><![endif]-->
