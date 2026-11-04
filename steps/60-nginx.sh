@@ -14,6 +14,7 @@ _nginx_common() {
 # context on some releases (13 does both), and a second one here would be a duplicate.
 # The health endpoint is polled, not browsed: 60 a minute per address is plenty.
 limit_req_zone $binary_remote_addr zone=cx_health:10m rate=60r/m;
+limit_req_zone $binary_remote_addr zone=cx_maintenance:10m rate=600r/m;
 limit_req_status 429;
 ssl_session_cache shared:cx_ssl:10m;
 ssl_session_timeout 1d;
@@ -80,6 +81,15 @@ server {
 $(_nginx_tls_lines "$SERVER_FQDN")
 	access_log /var/log/nginx/cx-health.access.log;
 
+	# Every app on this server reads it, from shared egress addresses (Vercel's): a zone of its own.
+	location = /maintenance.json {
+		limit_req zone=cx_maintenance burst=120 nodelay;
+		proxy_pass http://127.0.0.1:$HEALTH_PORT;
+		proxy_set_header Host \$host;
+		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_read_timeout 10s;
+	}
 	location ~ ^/(healthz|status|metrics)\$ {
 		limit_req zone=cx_health burst=30 nodelay;
 		proxy_pass http://127.0.0.1:$HEALTH_PORT;

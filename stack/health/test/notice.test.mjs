@@ -41,3 +41,36 @@ test('expected downtime: measured gap plus a minute for Postgres, never under a 
   assert.equal(expectedDowntime(null).text, 'about 2 minutes');
   assert.equal(expectedDowntime({ offline_seconds: 200 }).minutes, 5);
 });
+
+const manual = (notice) => ({
+  server: { hostname: 'db-1' },
+  timezone: 'Europe/London',
+  notice: { mode: 'maintenance', at: '2026-11-10T02:00:00Z', ends_by: '2026-11-10T02:30:00Z', expected_minutes: 30, message: 'Upgrading the database', databases: ['app'], objects: true, feed: true, ...notice },
+});
+
+test('maintenance booked by hand: its own length, its message, the window end, and the maintenance commands', () => {
+  const n = rebootNotice(manual({ kind: 'booked' }), NOW);
+  assert.equal(n.subject, '🛠 db-1 maintenance Tue 10 Nov 2026, 02:00 GMT — about 30 minutes down');
+  for (const bit of ['Maintenance is booked for Tue 10 Nov 2026, 02:00 GMT.', 'Tue 10 Nov 2026, 02:00 GMT – 02:30 GMT', 'Upgrading the database', 'cx-pgsql maintenance end', 'cx-pgsql maintenance extend 15m', 'maintenance page']) {
+    assert.ok(n.html.includes(bit), bit);
+  }
+  assert.ok(!n.html.includes('shutdown -c'));
+  assert.ok(!n.html.includes('/healthz'), 'the health endpoint stays up during maintenance by hand');
+  assert.match(n.text, /The apps +show a planned-maintenance notice/);
+});
+
+test('maintenance started now, extended, and called off', () => {
+  const started = rebootNotice(manual({ kind: 'booked', at: '2026-11-04T11:30:00Z', ends_by: '2026-11-04T11:50:00Z', expected_minutes: 20 }), NOW);
+  assert.ok(started.html.includes('Maintenance started at Wed 4 Nov 2026, 11:30 GMT.'));
+  assert.ok(started.html.includes('db-1 goes down for maintenance now'));
+  const over = rebootNotice(manual({ kind: 'extended', at: '2026-11-04T11:30:00Z', previous_ends_by: '2026-11-04T11:50:00Z', ends_by: '2026-11-04T12:05:00Z' }), NOW);
+  assert.equal(over.subject, '⏱ db-1: maintenance running over — until 12:05 GMT');
+  assert.ok(over.html.includes('now runs until Wed 4 Nov 2026, 12:05 GMT (it was 11:50 GMT)'));
+  const off = rebootNotice(manual({ kind: 'cancelled', previous_at: '2026-11-10T02:00:00Z' }), NOW);
+  assert.equal(off.subject, '✅ db-1: planned maintenance cancelled');
+});
+
+test('a 3-hour window reads in hours', () => {
+  const n = rebootNotice(manual({ kind: 'booked', ends_by: '2026-11-10T05:00:00Z', expected_minutes: 180 }), NOW);
+  assert.match(n.subject, /about 3 hours down$/);
+});

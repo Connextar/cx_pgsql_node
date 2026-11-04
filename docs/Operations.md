@@ -67,6 +67,40 @@ form with literals masked, and log messages keep only schema names.
 base backups, upload, verify), certificate expiry, transaction-ID wraparound and cache hit rate.
 Thresholds: `stack/health/README.md`; the main ones are in `config/server.env`.
 
+## Maintenance windows
+
+The apps on this server read `https://psql-node-1.connextar.com/maintenance.json` (`@connextar/house/maintenance`):
+from the moment a window is booked they show a dismissible **planned maintenance** notice with its times;
+from a minute before it starts they show a **maintenance page** instead of erroring, and APIs answer 503; the
+moment the window ends they come back by themselves (within about 15 s). The design and the feed's contract
+are in cx-house's `docs/Maintenance.md`.
+
+- **Reboots need nothing from you.** A reboot booked by unattended-upgrades (`AUTO_REBOOT`) or by
+  `sudo shutdown -r <time>` becomes a window the moment it's booked (`cx-maintenance.path`, with a
+  five-minutely timer as a safety net): it lasts `MAINTENANCE_MIN_MINUTES` (15) or three times the expected
+  downtime, whichever is longer. Moving the reboot replaces it; `sudo shutdown -c` cancels it. After the
+  reboot, `cx-maintenance-settle.service` waits for Postgres, PgBouncer and the object store to be healthy and
+  ends the window there and then — so the apps are down for the reboot, not for the window.
+- **Anything else, book by hand** (on the server, or `bin/remote.sh cx maintenance …` from your machine):
+  ```bash
+  cx-pgsql maintenance plan "2026-11-10 02:00" 30m "Upgrading the database"   # UK time; the message is public
+  cx-pgsql maintenance start 20m        # from now (a planned window starts now instead)
+  cx-pgsql maintenance extend 15m       # running over: without this the apps come back at the window's end
+  cx-pgsql maintenance end              # finished: the apps are back within about 15 s
+  cx-pgsql maintenance cancel           # call off a planned one
+  cx-pgsql maintenance status           # booked, under way, recently ended
+  cx-pgsql maintenance feed             # exactly what the apps read
+  ```
+  Booking, moving, extending and cancelling email `REBOOT_NOTICE_TO` (as a booked reboot does); ending
+  doesn't. Only one window booked by hand is open at a time: `plan` again moves it.
+- **Ending is what brings the apps back early.** Forget `end` and they stay on their maintenance page until
+  the window runs out. If the work runs over, `extend` before the end — otherwise the apps start serving
+  again against a database that isn't there yet.
+- **Nothing here stops anything.** A window only tells the apps; the downtime itself is the reboot, or
+  whatever you then do. The window file is `/var/lib/cx-pgsql/maintenance/windows.json`; the health
+  container mounts its directory read-only. `MAINTENANCE_FEED=false` stops the units (the apps then hear of
+  nothing).
+
 ## Databases
 
 **Add one:** create `config/databases/<name>.env` (copy `example.env.sample`), then
@@ -233,6 +267,8 @@ with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTAR
   starts by itself, a minute or two down. `AUTO_REBOOT=false` turns that off: then the morning report warns
   "a reboot is pending and nothing has booked it" until you reboot by hand. To book one yourself:
   `sudo shutdown -r 23:00` (cancel with `sudo shutdown -c`); the report then shows it as booked.
+- **The apps** show a planned-maintenance notice for a booked reboot and a maintenance page during it: see
+  [Maintenance windows](#maintenance-windows).
 - **Planned-downtime email** (`REBOOT_NOTICE`, on with the report): the moment a reboot or power-off is
   booked — by unattended-upgrades or by hand — `REBOOT_NOTICE_TO` (default `REPORT_TO`) gets an email: when
   (London time and UTC), expected downtime (the last reboot's measured gap plus a minute for Postgres), the
@@ -240,6 +276,11 @@ with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTAR
   another; nothing is sent twice. `cx-reboot-notice.path` watches `/run/systemd/shutdown`, a timer at :05 and
   :35 catches anything missed and retries a failed send. See it without sending: `bin/remote.sh report-preview
   --notice`. The morning report shows the last reboot and how long the server was off.
+- **Everything comes back after a reboot**: PgBouncer has `restart: always`; Postgres, health and Garage
+  have `unless-stopped`, so one you stopped yourself stays stopped. `status` warns about a running container
+  that Docker wouldn't start again; `cx-pgsql restart <service>` clears it. Never send a container a signal
+  with `docker kill -s …`: Docker counts that as a manual stop. Send it from inside the container
+  (`docker exec <container> kill -HUP 1`).
 - **Postgres minor releases** (17.11 → 17.12), PgBouncer and pgBackRest come with the images. Rebuild
   from the latest base images and restart, at a quiet moment:
   ```bash

@@ -22,6 +22,7 @@ test('defaults match the documented values', () => {
     reportMaxAgeHours: 50,
   });
   assert.deepEqual(cfg.objects, { healthUrl: '' });
+  assert.deepEqual(cfg.maintenance, { file: '/maintenance/windows.json', server: 'cx-pgsql' });
   assert.equal(cfg.cacheSeconds, 15);
   assert.equal(cfg.includeQueryText, false);
 });

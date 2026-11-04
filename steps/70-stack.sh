@@ -61,6 +61,8 @@ PG_IMAGE_VARIANT=$PG_IMAGE_VARIANT
 PG_CONTAINER=$PG_CONTAINER
 PGBOUNCER_CONTAINER=$PGBOUNCER_CONTAINER
 HEALTH_CONTAINER=$HEALTH_CONTAINER
+SERVER_HOSTNAME=$SERVER_HOSTNAME
+MAINTENANCE_DIR=$MAINTENANCE_DIR
 N8N_CONTAINER=$N8N_CONTAINER
 PG_DATA_DIR=$PG_DATA_DIR
 DATA_ROOT=$DATA_ROOT
@@ -292,11 +294,23 @@ stack_check() {
     chk "$svc running and healthy" _stack_container_healthy "${STACK_NAME}-$svc"
   done
   chk "containers match their configuration" _stack_up_to_date
+  chk_soft "every container starts again after a reboot" _stack_all_restart
   chk "no setting waiting for a restart" _stack_no_pending_restart
   chk "cluster roles (cx_monitor, pgbouncer_auth) and pg_stat_statements" _stack_cluster_roles_ok
   chk "monitor login through PgBouncer with TLS" pg_login_ok cx_monitor postgres cx-monitor-password 127.0.0.1 "$PGBOUNCER_PUBLIC_PORT" require
   is_true "$BACKUP_PITR" && chk "pgBackRest stanza '$PGBACKREST_STANZA'" _stack_stanza_ok
   return 0
+}
+
+# A running container marked as manually stopped stays down after a reboot (see containers_not_restarting).
+# Only a restart clears the mark, so this warns rather than repairs: cx-pgsql restart <service>.
+_stack_all_restart() {
+  local svc names=() bad
+  for svc in $(_stack_services); do names+=("${STACK_NAME}-$svc"); done
+  bad=$(containers_not_restarting "${names[@]}")
+  [[ -z "$bad" ]] && return 0
+  warn "Would stay down after a reboot: $(echo $bad) — clear it with  cx-pgsql restart ${bad//${STACK_NAME}-/}"
+  return 1
 }
 
 _stack_sources_in_sync() {
@@ -408,7 +422,7 @@ stack_apply() {
       warn "Run: cx-pgsql restart postgres  (or set PG_ALLOW_AUTO_RESTART=true)"
     fi
   fi
-  ((bouncer_changed)) && docker kill -s HUP "$PGBOUNCER_CONTAINER" >/dev/null
+  ((bouncer_changed)) && pgbouncer_reload >/dev/null
 
   # pgBackRest: the stanza must exist before WAL can be archived.
   if is_true "$BACKUP_PITR" && ! _stack_stanza_ok; then

@@ -147,6 +147,38 @@ test('without a configured token /status and /metrics answer 503 "not configured
   }
 });
 
+test('/maintenance.json: public, CORS, served while PostgreSQL is down; missing file empty, unreadable 503', async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'cx-maint-'));
+  const file = join(dir, 'windows.json');
+  const starts = new Date(Date.now() + 3_600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const ends = new Date(Date.now() + 4_500_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  writeFileSync(file, JSON.stringify({ version: 1, windows: [{ id: 'reboot-t', kind: 'reboot', starts_at: starts, ends_by: ends, expected_minutes: 2, affects: ['postgres'], packages: ['linux-image-x'], reason: 'secret reason' }] }));
+  const m = await startServer({ MAINTENANCE_FILE: file, SERVER_NAME: 'db-test' });
+  try {
+    const res = await fetch(`${m.base}/maintenance.json`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const body = await res.json();
+    assert.equal(body.server, 'db-test');
+    assert.deepEqual(body.windows.map((w) => [w.id, w.state]), [['reboot-t', 'planned']]);
+    assert.doesNotMatch(JSON.stringify(body), /linux-image|secret reason/);
+
+    writeFileSync(file, '{broken');
+    assert.equal((await fetch(`${m.base}/maintenance.json`)).status, 503);
+    rmSync(file);
+    const empty = await fetch(`${m.base}/maintenance.json`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual((await empty.json()).windows, []);
+  } finally {
+    m.child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('logs: one line per request, no token, probe error logged once; SIGTERM exits 0 within 5s', async () => {
   for (let i = 0; i < 3; i++) await fetch(`${srv.base}/healthz`);
   const exited = new Promise((resolve) => srv.child.once('exit', (code, signal) => resolve({ code, signal })));

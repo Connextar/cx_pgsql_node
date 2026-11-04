@@ -303,7 +303,7 @@ case $CMD in
   teardown) cmd_sync; remote_setup teardown "$@" ;;
   confirm) confirm_from_new_connection ;;
   sync) cmd_sync ;;
-  cx) pick_target; rssh_t "$SUDO $INSTALL_DIR/bin/cx-pgsql $*" ;;
+  cx) pick_target; rssh_t "$SUDO $INSTALL_DIR/bin/cx-pgsql $(printf '%q ' "$@")" ;; # each argument quoted: a time like "2026-11-10 02:00" stays one
   ssh) pick_target; rssh_t ;;
   tunnel)
     pick_target

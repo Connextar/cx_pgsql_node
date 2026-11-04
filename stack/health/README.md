@@ -5,7 +5,7 @@ PgBouncer, WAL archiving, the backup jobs (via their status file), the data-dire
 memory, and the TLS certificate.
 
 It is plain Node.js 24 (built-in `http`) with one dependency, [`pg`](https://www.npmjs.com/package/pg)
-(pinned to 8.23.1). nginx on the host terminates TLS and proxies `/healthz`, `/status` and `/metrics` to it on
+(pinned to 8.23.1). nginx on the host terminates TLS and proxies `/healthz`, `/maintenance.json`, `/status` and `/metrics` to it on
 `127.0.0.1`.
 
 The first tenant database holds children's education records, so the service **never returns row data,
@@ -16,6 +16,7 @@ bind-parameter values or secrets** (see [What is never exposed](#what-is-never-e
 | Path | Auth | Answer |
 | --- | --- | --- |
 | `GET /healthz` | none (public) | `{ "status", "time", "checks": { "<name>": "ok"\|"warn"\|"fail" } }` — names and states only, no messages or numbers. **200** for `ok` and `warn`, **503** for `fail`. |
+| `GET /maintenance.json` | none (public, `Access-Control-Allow-Origin: *`) | The maintenance windows (`MAINTENANCE_FILE`, kept by `lib/maintenance.sh`) for the apps on this server: `{ "version": 1, "server", "generated_at", "windows": [{ "id", "kind", "state", "starts_at", "ends_by", "expected_minutes", "ended_at", "affects", "message" }] }`. `state` is worked out from the times when served; windows closed over a day ago drop out; nothing else stored about a window is published. **200** (an empty list when there's no file), **503** when the file can't be read — the apps then keep the copy they have. Never touches PostgreSQL. The contract: cx-house `docs/Maintenance.md` §2. |
 | `GET /status` | `Authorization: Bearer <token>` | The full JSON report (below). **200** whenever a report was produced — read `status` in the body. |
 | `GET /metrics` | `Authorization: Bearer <token>` | Prometheus text exposition format 0.0.4. |
 
@@ -333,6 +334,6 @@ npm test
 
 `node --test` covers threshold evaluation, overall status, the backup rules (including a missing or garbled
 status file), the WAL-archive rules, Prometheus formatting and label escaping, token comparison, SQL literal
-masking, configuration parsing and `/healthz` redaction. `test/http.test.mjs` also starts the real server with
+masking, configuration parsing, `/healthz` redaction and the maintenance feed (`test/maintenance.test.mjs`). `test/http.test.mjs` also starts the real server with
 PostgreSQL pointed at a closed port to check routing, auth, headers, logging, survival of a database outage and
 SIGTERM shutdown — no database needed.

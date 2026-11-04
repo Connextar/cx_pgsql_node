@@ -103,7 +103,7 @@ databases_apply() {
   pg_running || die "Postgres isn't running — apply the stack step first."
   db_each _dbs_apply_one
   # PgBouncer re-reads its database list (the stack step wrote it) and forgets cached auth.
-  docker kill -s HUP "$PGBOUNCER_CONTAINER" >/dev/null 2>&1 || true
+  pgbouncer_reload >/dev/null 2>&1 || true
   sleep 1
 }
 

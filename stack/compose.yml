@@ -65,7 +65,9 @@ services:
         PG_IMAGE_VARIANT: ${PG_IMAGE_VARIANT}
     image: cx-pgsql/pgbouncer:${PG_VERSION}
     container_name: ${PGBOUNCER_CONTAINER}
-    restart: unless-stopped
+    # always, not unless-stopped: it holds nothing, and the apps reach Postgres only through it, so it must be up
+    # after every boot — even if something (as `docker kill -s HUP` once did) marked it as manually stopped.
+    restart: always
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,8 +122,13 @@ services:
       OBJECTS_BACKUP_MAX_AGE_HOURS: ${HEALTH_OBJECTS_BACKUP_MAX_AGE_HOURS:-3}
       WARN_OBJECTS_CAPACITY_PCT: ${HEALTH_OBJECTS_WARN_CAPACITY_PCT:-50}
       FAIL_OBJECTS_CAPACITY_PCT: ${HEALTH_OBJECTS_FAIL_CAPACITY_PCT:-90}
+      # The maintenance windows it publishes as /maintenance.json (lib/maintenance.sh). The directory, not the
+      # file: windows.json is replaced by a rename, which a file mount would never see.
+      MAINTENANCE_FILE: /maintenance/windows.json
+      SERVER_NAME: ${SERVER_HOSTNAME:-cx-pgsql}
     volumes:
       - ./secrets/health:/run/cx-secrets:ro
+      - ${MAINTENANCE_DIR:-/var/lib/cx-pgsql/maintenance}:/maintenance:ro
       - ${BACKUP_ROOT}/status:/backups/status:ro
       - ./certs/server.crt:/certs/server.crt:ro
       # Only for disk usage (statfs) of the filesystem holding the data directory.

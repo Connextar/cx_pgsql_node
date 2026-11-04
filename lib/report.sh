@@ -355,9 +355,11 @@ rpt_reboot_notice() { # [--preview]
     --argjson last "$(_rpt_last_reboot)" \
     --argjson dbs "$(pg_sql -At -d postgres -c "SELECT coalesce(json_agg(datname ORDER BY datname), '[]') FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'" 2>/dev/null || echo '[]')" \
     --argjson objects "$(is_true "$ENABLE_OBJECTS" && echo true || echo false)" \
+    --argjson feed "$(is_true "${MAINTENANCE_FEED:-true}" && echo true || echo false)" \
     '{server: {hostname: $host, fqdn: $fqdn}, timezone: $tz,
       notice: {kind: $kind, mode: $mode, at: (if $at == "" then null else $at end), previous_at: (if $prev == "" then null else $prev end),
-               reason: (if $reason == "" then null else $reason end), packages: $pkgs, last_reboot: $last, databases: $dbs, objects: $objects}}' >"$input"
+               reason: (if $reason == "" then null else $reason end), packages: $pkgs, last_reboot: $last, databases: $dbs, objects: $objects,
+               feed: $feed}}' >"$input"
   if ! docker exec -i "$HEALTH_CONTAINER" node /app/digest.mjs notice <"$input" >"$digest" || ! jq -e .subject "$digest" >/dev/null 2>&1; then
     rm -f "$input" "$digest"
     die "The reboot notice could not be built (is $HEALTH_CONTAINER running?) — the timer tries again."

@@ -1,6 +1,8 @@
-// CX_PGSQL_Node_1 health service: GET /healthz (public), /status and /metrics (bearer token).
+// CX_PGSQL_Node_1 health service: GET /healthz and /maintenance.json (public), /status and /metrics (bearer token).
+import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import { ConfigError, describeConfig, loadConfig } from './src/config.mjs';
+import { maintenanceFeed } from './src/maintenance.mjs';
 import { CONTENT_TYPE as METRICS_TYPE, renderMetrics } from './src/metrics.mjs';
 import { PG_SECTIONS, createPools, probeHost, probeObjects, probePgbouncer, probePostgres, readBackupStatus, readCertificate } from './src/probes.mjs';
 import { buildReport, healthzView, makeCheck } from './src/report.mjs';
@@ -114,6 +116,23 @@ async function route(req, res) {
   if (path === '/healthz') {
     const report = await getReport();
     return send(req, res, report.status === 'fail' ? 503 : 200, healthzView(report));
+  }
+
+  if (path === '/maintenance.json') {
+    // Public, read by every app on this server (and by browsers, hence CORS). Never touches Postgres, so it
+    // answers during a maintenance window. An unreadable file is a 503: the apps keep the copy they have.
+    let stored = null;
+    try {
+      stored = JSON.parse(await readFile(cfg.maintenance.file, 'utf8'));
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        log('maintenance', 'cannot read', cfg.maintenance.file, errorMessage(err));
+        return send(req, res, 503, { error: 'maintenance windows unreadable' }, { headers: { 'access-control-allow-origin': '*' } });
+      }
+    }
+    return send(req, res, 200, maintenanceFeed(stored, new Date(), cfg.maintenance.server), {
+      headers: { 'access-control-allow-origin': '*' },
+    });
   }
 
   if (path === '/status' || path === '/metrics') {

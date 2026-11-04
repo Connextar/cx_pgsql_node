@@ -112,3 +112,34 @@ after the apply: `tests/vps.sh exec bash -s < tests/objects-test.sh`.
   - A restore left `live/` behind until the next hourly copy, which made verify fail. A restore
     now refreshes the copy.
   - The `deleted/` archive wasn't checked at all. A sample is now read back in full.
+
+## Maintenance windows and coming back after a reboot (2026-11-04)
+
+`steps/87-maintenance.sh` + `lib/maintenance.sh` + the health service's `/maintenance.json`. `tests/maintenance-test.sh`
+holds the checks; run it after an apply: `tests/vps.sh exec bash -s < tests/maintenance-test.sh`.
+
+- **Upgrade path, as the real server would take it** (fresh VPS): the committed version (`5df95a3`) → this
+  version. Only the health container was recreated, then PgBouncer once for its new restart policy; Postgres
+  and Garage weren't touched. A second apply changed nothing; every step DONE.
+- **17 of 17 checks passed:**
+  - The feed is published through nginx with CORS and names the server.
+  - A real `shutdown -r +180` becomes a 15-minute window through the path unit. Moving it replaces the
+    window, and `shutdown -c` cancels it. Nothing internal is published (the wall message, packages, source).
+  - `plan`, `start` (replacing the planned window), `extend`, `end` and `status` all work.
+  - The settle job ends a reboot window that's under way.
+  - An unreadable file is a 503.
+  - `bin/remote.sh cx maintenance plan "<date> 03:15" 45m "It's a quoted message"` keeps both quoted arguments
+    whole (it used to join them with `$*`).
+- **A restart of the VPS** (`docker restart cxvps-test`) with a reboot window under way, and PgBouncer
+  deliberately marked the old way (`docker kill -s HUP`): all four containers came back, and the settle job
+  ended the window three seconds after boot. Restarting the container resets its hostname, so the base step
+  then reads BROKEN; that's an artefact of the test container.
+- **Found and fixed on the way:**
+  - **PgBouncer would not have come back after a reboot.** Docker (29.9) counts `docker kill -s HUP` (how the
+    stack, databases and TLS steps and `db rotate` made it re-read its configuration) as a manual stop
+    (`HasBeenManuallyStopped`). Under `restart: unless-stopped` a container marked so isn't started again at
+    boot. Now the reload is sent from inside the container (`pgbouncer_reload`), and PgBouncer has
+    `restart: always`. The stack check warns about any running container that wouldn't come back.
+  - `lib/maintenance.sh` read `$MAINTENANCE_DIR` before the config was loaded, so every unit failed.
+  - Boot time came from `/proc/uptime`, which inside a container is the host's. It now comes from PID 1's age.
+  - The settle job went on waiting after its window had been ended.

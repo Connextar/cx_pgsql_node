@@ -86,7 +86,7 @@ tls_reload_services() {
     docker exec -u postgres "$PG_CONTAINER" psql -qAtc 'SELECT pg_reload_conf()' >/dev/null && info "Postgres re-read its certificate"
   fi
   if docker inspect -f '{{.State.Running}}' "$PGBOUNCER_CONTAINER" 2>/dev/null | grep_q true; then
-    docker kill -s HUP "$PGBOUNCER_CONTAINER" >/dev/null && info "PgBouncer re-read its certificate"
+    pgbouncer_reload >/dev/null && info "PgBouncer re-read its certificate"
   fi
   return 0
 }

@@ -97,6 +97,8 @@ derive_config() {
   # Object storage (steps/72-objects.sh, lib/objects.sh).
   export OBJECTS_DIR="$STACK_DIR/objects"
   export OBJECTS_CONTAINER="${STACK_NAME}-objects"
+  # Maintenance windows (lib/maintenance.sh); the health service mounts the directory to publish them.
+  export MAINTENANCE_DIR=/var/lib/cx-pgsql/maintenance
 }
 
 is_true() { [[ "${1,,}" =~ ^(1|true|yes|on)$ ]]; }
@@ -199,6 +201,23 @@ secret_hex() {
 # ─── Services ──────────────────────────────────────────────────────────────────────
 unit_active() { systemctl is-active --quiet "$1"; }
 unit_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
+
+# PgBouncer re-reads its configuration (and certificate) on SIGHUP. Sent from inside the container, never with
+# `docker kill -s HUP`: Docker counts any signal sent that way as a manual stop (HasBeenManuallyStopped, seen on
+# 29.9), and a container marked so isn't started again after a reboot under `restart: unless-stopped`.
+pgbouncer_reload() { docker exec "$PGBOUNCER_CONTAINER" kill -HUP 1; }
+
+# Running containers Docker would not start again after a reboot: marked as manually stopped (an old
+# `docker kill -s HUP`, a `docker stop` later undone by hand) under `restart: unless-stopped`. Prints their names.
+containers_not_restarting() {
+  local c id
+  for c in "$@"; do
+    id=$(docker inspect -f '{{if .State.Running}}{{if eq .HostConfig.RestartPolicy.Name "unless-stopped"}}{{.Id}}{{end}}{{end}}' "$c" 2>/dev/null) || continue
+    [[ -n "$id" ]] || continue
+    [[ "$(jq -r '.HasBeenManuallyStopped // false' "/var/lib/docker/containers/$id/config.v2.json" 2>/dev/null)" == true ]] && echo "$c"
+  done
+  return 0
+}
 
 # ─── Rollback timers (SSH and firewall) ────────────────────────────────────────────
 # Before a change that could lock us out, save what it replaces and schedule its undo.

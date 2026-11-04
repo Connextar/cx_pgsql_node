@@ -37,6 +37,16 @@
 #                                             path unit does this by itself; --preview only builds it)
 #   cx-pgsql report brevo-configure            (the Brevo API key on stdin)
 #
+#   cx-pgsql maintenance status                windows booked, under way and just ended (and where they're published)
+#   cx-pgsql maintenance plan "2026-11-10 02:00" 30m [public message]
+#                                             book a window (UK time unless the time names a zone); the
+#                                             apps show a notice now and a maintenance page during it
+#   cx-pgsql maintenance start [30m] [message] maintenance from now
+#   cx-pgsql maintenance extend 15m            running over: push the window's end out
+#   cx-pgsql maintenance end                   finished: the apps come back within seconds
+#   cx-pgsql maintenance cancel                call off a planned window (a booked reboot: shutdown -c)
+#   cx-pgsql maintenance feed                  what the apps read (GET /maintenance.json)
+#
 #   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
 set -Eeuo pipefail
 
@@ -46,7 +56,7 @@ export PROJECT_DIR
 LOG_FILE=/var/log/cx-pgsql.log
 # shellcheck source=../lib/core.sh
 source "$PROJECT_DIR/lib/core.sh"
-for _lib in tls dbconf pg backup restore objects report; do
+for _lib in tls dbconf pg backup restore objects report maintenance; do
   # shellcheck source=/dev/null
   source "$PROJECT_DIR/lib/$_lib.sh"
 done
@@ -144,7 +154,7 @@ cmd_db() {
       [[ -f "$path" ]] && cp -a "$path" "$path.previous"
       rm -f "$path"
       pg_set_password "$DB_USER" "$DB_SECRET"
-      docker kill -s HUP "$PGBOUNCER_CONTAINER" >/dev/null 2>&1 || true
+      pgbouncer_reload >/dev/null 2>&1 || true
       ok "New password for $DB_USER (the old one is in $path.previous). Update the app, then: cx-pgsql db url $name --show-password"
       ;;
     import)
@@ -353,6 +363,21 @@ cmd_report() {
   esac
 }
 
+cmd_maintenance() {
+  case ${1:-status} in
+    status) mnt_status ;;
+    plan) shift; mnt_plan "$@" ;;
+    start) shift; mnt_start "$@" ;;
+    extend) shift; mnt_extend "$@" ;;
+    end) mnt_end ;;
+    cancel) mnt_cancel ;;
+    feed) mnt_feed ;;
+    sync) mnt_sync ;;     # cx-maintenance.path / .timer
+    settle) mnt_settle ;; # cx-maintenance-settle.service, at boot
+    *) die "maintenance status|plan <when> <duration> [message]|start [duration] [message]|extend <duration>|end|cancel|feed" ;;
+  esac
+}
+
 case $1 in
   info) cmd_info ;;
   ps) _compose ps ;;
@@ -365,6 +390,7 @@ case $1 in
   restore) shift; cmd_restore "$@" ;;
   objects) shift; cmd_objects "$@" ;;
   report) shift; cmd_report "$@" ;;
+  maintenance) shift; cmd_maintenance "$@" ;;
   secret)
     [[ "${2:-}" == show && -n "${3:-}" ]] || die "cx-pgsql secret show <name>  (names: $(ls "$SECRETS_DIR" | tr '\n' ' '))"
     cat "$(secret_path "$3")"

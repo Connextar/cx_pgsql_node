@@ -104,6 +104,10 @@ export function loadConfig(env = process.env) {
       reportMaxAgeHours: number('REPORT_MAX_AGE_HOURS', 50, { min: 1 }),
     },
 
+    // The windows lib/maintenance.sh keeps (a directory mount, so its atomic renames are seen), and the
+    // server name the public feed carries.
+    maintenance: { file: str('MAINTENANCE_FILE', '/maintenance/windows.json'), server: str('SERVER_NAME', 'cx-pgsql') },
+
     cacheSeconds: number('CACHE_SECONDS', 15, { min: 0, max: 3600 }),
     includeQueryText: bool('STATUS_INCLUDE_QUERY_TEXT', false),
   };
@@ -128,6 +132,7 @@ export function describeConfig(cfg) {
     `pg_password=${cfg.pg.password ? 'set' : 'unset'}`,
     cfg.pgbouncer.enabled ? `pgbouncer=${cfg.pgbouncer.host}:${cfg.pgbouncer.port} probe_db=${cfg.pgbouncer.probeDatabase}` : 'pgbouncer=disabled',
     cfg.objects.healthUrl ? `objects=${cfg.objects.healthUrl}` : 'objects=disabled',
+    `maintenance=${cfg.maintenance.file} server=${cfg.maintenance.server}`,
     `cache=${cfg.cacheSeconds}s`,
     `query_text=${cfg.includeQueryText}`,
   ].join(' ');
