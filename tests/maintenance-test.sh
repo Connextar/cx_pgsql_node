@@ -52,5 +52,18 @@ cp "$f" /tmp/w.json; echo '{broken' >"$f"
 check "a 503, so the apps keep their copy" bash -c "[[ \$(curl -sk -o /dev/null -w '%{http_code}' --resolve '$SERVER_FQDN:443:127.0.0.1' '$FEED') == 503 ]]"
 cp /tmp/w.json "$f"
 
+echo "The nightly report"
+t=$(mktemp -d)
+mkdir -p "$t/logs/postgres" "$t/mnt"
+printf '%s\n' \
+  '2026-11-04 23:00:01.100 UTC [11] 10.0.0.2(5001) alted@alted FATAL:  terminating connection due to administrator command' \
+  '2026-11-05 03:00:01.000 UTC [14] 10.0.0.3(5003) alted@alted FATAL:  terminating connection due to administrator command' \
+  >"$t/logs/postgres/postgresql-Thu.log"
+printf '%s\n' '{"version":1,"windows":[{"id":"r","kind":"reboot","starts_at":"2026-11-04T23:00:00Z","ends_by":"2026-11-04T23:15:00Z","ended_at":"2026-11-04T23:00:35Z","cancelled_at":null}]}' >"$t/mnt/windows.json"
+pglog=$(STACK_LOGS_DIR="$t/logs" MAINTENANCE_DIR="$t/mnt" bash -c 'source /opt/cx-pgsql/lib/core.sh; source /opt/cx-pgsql/lib/report.sh; _rpt_pg_log "2026-11-04 00:00:00"' 2>/dev/null)
+check "shutdown FATAL inside a window marked planned, the same outside one not" \
+  jq -e '[.errors[] | select(.severity == "FATAL") | .planned] | sort == [false, true]' <<<"$pglog"
+rm -rf "${t:?}"
+
 echo "passed $pass, failed $failed"
 ((failed == 0))

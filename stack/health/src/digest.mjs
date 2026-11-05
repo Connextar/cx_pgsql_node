@@ -300,21 +300,34 @@ export function buildDigest(input, nowArg) {
   // Postgres log: errors grouped by masked message, statements over log_min_duration_statement.
   const pgLog = isObj(host.pg_log) ? host.pg_log : {};
   const logErrors = (Array.isArray(pgLog.errors) ? pgLog.errors : [])
-    .map((e) => ({ severity: e.severity, who: e.who ?? null, message: maskLogMessage(e.message), count: n(e.count) ?? 1 }))
+    .map((e) => ({ severity: e.severity, who: e.who ?? null, message: maskLogMessage(e.message), planned: e.planned === true, count: n(e.count) ?? 1 }))
     .reduce((acc, e) => {
-      const k = `${e.severity}|${e.who}|${e.message}`;
+      const k = `${e.severity}|${e.who}|${e.message}|${e.planned}`;
       const hit = acc.get(k);
       if (hit) hit.count += e.count;
       else acc.set(k, { ...e });
       return acc;
     }, new Map());
   const errorGroups = [...logErrors.values()].sort((a, b) => b.count - a.count);
-  const errorCount = (sev) => errorGroups.filter((e) => e.severity === sev).reduce((s, e) => s + e.count, 0);
-  const pgErrors = { panic: errorCount('PANIC'), fatal: errorCount('FATAL'), error: errorCount('ERROR'), warning: errorCount('WARNING') };
+  const errorCount = (sev, test = () => true) => errorGroups.filter((e) => e.severity === sev && test(e)).reduce((s, e) => s + e.count, 0);
+  const pgErrors = {
+    panic: errorCount('PANIC'),
+    fatal: errorCount('FATAL'),
+    // FATAL lines inside a maintenance window (lib/report.sh marks them): a reboot's shutdown ends every open
+    // connection with one, so they're expected there. PANIC counts wherever it is.
+    fatal_planned: errorCount('FATAL', (e) => e.planned),
+    error: errorCount('ERROR'),
+    warning: errorCount('WARNING'),
+  };
   if (pgErrors.panic) issue('fail', 'PostgreSQL log', `${pgErrors.panic} PANIC line${pgErrors.panic === 1 ? '' : 's'} in the log.`);
-  if (pgErrors.fatal) {
-    const top = errorGroups.find((e) => e.severity === 'FATAL');
-    issue('warn', 'PostgreSQL log', `${pgErrors.fatal} FATAL line${pgErrors.fatal === 1 ? '' : 's'}, most often: ${top.message}`);
+  const fatalUnplanned = pgErrors.fatal - pgErrors.fatal_planned;
+  if (fatalUnplanned) {
+    const top = errorGroups.find((e) => e.severity === 'FATAL' && !e.planned);
+    issue('warn', 'PostgreSQL log', `${fatalUnplanned} FATAL line${fatalUnplanned === 1 ? '' : 's'}, most often: ${top.message}`);
+  }
+  if (pgErrors.fatal_planned) {
+    const top = errorGroups.find((e) => e.severity === 'FATAL' && e.planned);
+    issue('info', 'PostgreSQL log', `${pgErrors.fatal_planned} FATAL line${pgErrors.fatal_planned === 1 ? '' : 's'} during planned maintenance (expected: Postgres ends open connections as it stops), most often: ${top.message}`);
   }
   if (pgErrors.error) {
     const top = errorGroups.find((e) => e.severity === 'ERROR');
@@ -623,7 +636,7 @@ export function digestText({ model, subject }) {
   }
   if (m.postgres.errors.groups.length) {
     line('  Log errors:');
-    for (const e of m.postgres.errors.groups) line(`    ${formatCount(e.count).padStart(6)}×  ${e.severity}  ${e.who ? `${e.who}  ` : ''}${e.message}`);
+    for (const e of m.postgres.errors.groups) line(`    ${formatCount(e.count).padStart(6)}×  ${e.severity}  ${e.who ? `${e.who}  ` : ''}${e.message}${e.planned ? '  (planned maintenance)' : ''}`);
   }
   if (m.postgres.tables.length) {
     line('  Largest tables:');

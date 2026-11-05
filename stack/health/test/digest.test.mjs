@@ -122,6 +122,50 @@ test('slow app queries, a pending reboot, security updates and FATAL lines are w
   assert.equal(d.issues[0].severity, 'warn', 'issues are ordered worst first');
 });
 
+test('FATAL lines inside a maintenance window are a note; the same message outside one, and any PANIC, still count', () => {
+  const planned = buildDigest(
+    input({
+      host: {
+        pg_log: {
+          errors: [
+            { severity: 'FATAL', who: 'cx_monitor@postgres', message: 'terminating connection due to administrator command', planned: true, count: 2 },
+            { severity: 'FATAL', who: 'alted@alted', message: 'terminating connection due to administrator command', planned: true, count: 1 },
+          ],
+          slow: { count: 0, max_ms: null, threshold_ms: 500 },
+        },
+      },
+    }),
+    NOW,
+  );
+  const texts = planned.issues.map((i) => `${i.severity} ${i.area}: ${i.text}`);
+  assert.ok(!texts.some((t) => /^warn PostgreSQL log/.test(t)), texts.join('\n'));
+  assert.ok(texts.some((t) => /^info PostgreSQL log: 3 FATAL lines during planned maintenance \(expected: Postgres ends open connections as it stops\), most often: terminating connection due to administrator command/.test(t)), texts.join('\n'));
+  assert.equal(planned.model.postgres.errors.counts.fatal, 3);
+  assert.equal(planned.model.postgres.errors.counts.fatal_planned, 3);
+  assert.match(digestText(planned), /terminating connection due to administrator command {2}\(planned maintenance\)/);
+  assert.match(digestHtml(planned), /during planned maintenance/);
+
+  const mixed = buildDigest(
+    input({
+      host: {
+        pg_log: {
+          errors: [
+            { severity: 'FATAL', who: 'alted@alted', message: 'terminating connection due to administrator command', planned: true, count: 4 },
+            { severity: 'FATAL', who: 'alted@alted', message: 'terminating connection due to administrator command', count: 1 },
+            { severity: 'PANIC', who: null, message: 'could not write to file', planned: true, count: 1 },
+          ],
+          slow: { count: 0, max_ms: null, threshold_ms: 500 },
+        },
+      },
+    }),
+    NOW,
+  );
+  const mixedTexts = mixed.issues.map((i) => `${i.severity} ${i.area}: ${i.text}`);
+  assert.ok(mixedTexts.some((t) => /^warn PostgreSQL log: 1 FATAL line, most often: terminating connection/.test(t)), mixedTexts.join('\n'));
+  assert.ok(mixedTexts.some((t) => /^info PostgreSQL log: 4 FATAL lines during planned maintenance/.test(t)));
+  assert.ok(mixedTexts.some((t) => /^fail PostgreSQL log: 1 PANIC line/.test(t)));
+});
+
 test('failed backup runs, restarted containers and a full disk are reported', () => {
   const first = buildDigest(input(), new Date(YESTERDAY));
   const d = buildDigest(

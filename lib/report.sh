@@ -46,23 +46,40 @@ _rpt_since_lines() { # since file...
   awk -v s="$since" 'substr($0, 1, 19) >= s' "$@" 2>/dev/null || true
 }
 
-# Postgres log: ERROR/FATAL/PANIC/WARNING grouped (severity, user@db, message), and statements over
-# log_min_duration_statement. The raw message stays on this server: digest.mjs masks it before it's sent.
+# The maintenance windows as log-time ranges, one "start<TAB>end" line each ("YYYY-MM-DD HH:MM:SS", UTC, the
+# first 19 characters of a log line): from two minutes before the start (the apps stop a minute early; a
+# reboot's shutdown begins on the minute) to a minute after it ended — or after its latest end, if nothing
+# ended it. Cancelled windows don't count.
+_rpt_maintenance_ranges() {
+  local file="${MAINTENANCE_DIR:-/var/lib/cx-pgsql/maintenance}/windows.json"
+  [[ -s "$file" ]] || return 0
+  jq -r '(.windows // [])[] | select(.cancelled_at == null)
+         | [((.starts_at | fromdateiso8601) - 120), (((.ended_at // .ends_by) | fromdateiso8601) + 60)]
+         | map(strftime("%Y-%m-%d %H:%M:%S")) | @tsv' "$file" 2>/dev/null || true
+}
+
+# Postgres log: ERROR/FATAL/PANIC/WARNING grouped (severity, user@db, message, inside a maintenance window or
+# not), and statements over log_min_duration_statement. A reboot's shutdown always logs "terminating connection
+# due to administrator command" for each open connection; marked planned, the report counts it as expected.
+# The raw message stays on this server: digest.mjs masks it before it's sent.
 _rpt_pg_log() { # since
-  local since=$1 files=() f
+  local since=$1 files=() f ranges
+  ranges=$(_rpt_maintenance_ranges)
   for f in "$STACK_LOGS_DIR"/postgres/postgresql-*.log; do [[ -s "$f" ]] && files+=("$f"); done
   if ((${#files[@]} == 0)); then
     jq -nc --argjson t "${PG_LOG_MIN_DURATION_MS:-500}" '{errors: [], slow: {count: 0, max_ms: null, threshold_ms: $t}}'
     return
   fi
   _rpt_since_lines "$since" "${files[@]}" |
-    awk '
+    awk -v ranges="$ranges" '
+      BEGIN { nr = split(ranges, lines, "\n"); for (i = 1; i <= nr; i++) if (split(lines[i], r, "\t") == 2) { rs[++k] = r[1]; re[k] = r[2] } }
+      function planned(ts,   i) { for (i = 1; i <= k; i++) if (ts >= rs[i] && ts <= re[i]) return 1; return 0 }
       match($0, / (ERROR|FATAL|PANIC|WARNING):  /) {
         sev = substr($0, RSTART + 1, RLENGTH - 4); msg = substr($0, RSTART + RLENGTH)
         pre = substr($0, 1, RSTART - 1); who = ""
         if (match(pre, /[^ ]+@[^ ]+$/)) who = substr(pre, RSTART, RLENGTH)
         if (who == "@") who = ""
-        printf "E\t%s\t%s\t%s\n", sev, who, substr(msg, 1, 300); next
+        printf "E\t%s\t%s\t%s\t%d\n", sev, who, substr(msg, 1, 300), planned(substr($0, 1, 19)); next
       }
       match($0, / LOG:  duration: [0-9.]+ ms/) {
         d = substr($0, RSTART + 17, RLENGTH - 20); printf "D\t%s\n", d
@@ -70,8 +87,8 @@ _rpt_pg_log() { # since
     jq -Rsc --argjson t "${PG_LOG_MIN_DURATION_MS:-500}" '
       split("\n") | map(select(length > 0) | split("\t")) as $rows
       | {
-          errors: ($rows | map(select(.[0] == "E") | {severity: .[1], who: (.[2] | if . == "" then null else . end), message: .[3]})
-                   | group_by([.severity, .who, .message]) | map(.[0] + {count: length}) | sort_by(-.count) | .[:50]),
+          errors: ($rows | map(select(.[0] == "E") | {severity: .[1], who: (.[2] | if . == "" then null else . end), message: .[3], planned: (.[4] == "1")})
+                   | group_by([.severity, .who, .message, .planned]) | map(.[0] + {count: length}) | sort_by(-.count) | .[:50]),
           slow: ($rows | map(select(.[0] == "D") | (.[1] | tonumber)) | {count: length, max_ms: (max // null), threshold_ms: $t})
         }'
 }

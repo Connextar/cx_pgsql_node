@@ -171,7 +171,7 @@ ${code(s.query)}</td></tr>`,
   const errorList = p.errors.groups
     .map(
       (e) => `<tr><td class="rowline" style="padding:8px 0;border-bottom:1px solid ${C.line};font-family:${FONT};font-size:13px;line-height:18px;color:${C.text};">
-${pill(e.severity === 'ERROR' || e.severity === 'WARNING' ? 'info' : e.severity === 'PANIC' ? 'fail' : 'warn', e.severity)} <strong>${esc(formatCount(e.count))}×</strong> ${small(esc(e.who ?? ''))}
+${pill(e.severity === 'PANIC' ? 'fail' : e.severity === 'ERROR' || e.severity === 'WARNING' || e.planned ? 'info' : 'warn', e.severity)} <strong>${esc(formatCount(e.count))}×</strong> ${small(esc(e.who ?? ''))}${e.planned ? ` ${small('during planned maintenance')}` : ''}
 ${code(e.message)}</td></tr>`,
     )
     .join('');

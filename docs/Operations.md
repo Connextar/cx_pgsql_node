@@ -38,6 +38,10 @@ server emails `REPORT_TO` (`server-logs@connextar.com`) a summary of the last da
 - **Needs attention** first: every warning or failed health check, a pending reboot, security updates,
   slow app queries, failed backup runs, `FATAL`/`PANIC` log lines, deadlocks, restarted containers, a
   disk or Dropbox filling up — then notes (statement errors, other updates, PgBouncer warnings).
+  `FATAL` lines logged inside a maintenance window (two minutes before its start until a minute after
+  it ended, cancelled windows aside) are a note instead, marked "during planned maintenance": a reboot's
+  shutdown ends every open connection with "terminating connection due to administrator command".
+  `PANIC` is a failure wherever it falls.
 - **Server**: each disk (used / free / total), space by area (Postgres data, dumps, pgBackRest, object
   store), uptime, load, memory, swap, updates waiting, reboot pending, certificate, SSH logins and
   fail2ban per jail, every container's state.
