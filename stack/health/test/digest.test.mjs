@@ -166,6 +166,28 @@ test('FATAL lines inside a maintenance window are a note; the same message outsi
   assert.ok(mixedTexts.some((t) => /^fail PostgreSQL log: 1 PANIC line/.test(t)));
 });
 
+test('security updates: a note while the automatic updates are on and working; a warning otherwise', () => {
+  const run = (auto, previous = null, security_packages = ['openssl', 'libssl3t64', 'tzdata']) => {
+    const d = buildDigest(input({ host: { updates: { total: 7, security: 3, packages: [], security_packages, auto } }, ...(previous ? { previous } : {}) }), NOW);
+    return { d, texts: d.issues.filter((i) => i.area === 'Server').map((i) => `${i.severity} ${i.text}`) };
+  };
+  const working = { enabled: true, last_run: '2026-11-04T05:23:11Z', last_ok: true };
+
+  const fresh = run(working);
+  assert.deepEqual(fresh.texts, ['info 3 security updates waiting; the automatic security updates install them on their next run (last run Wed 4 Nov 2026, 05:23 GMT, no errors).']);
+  assert.deepEqual(fresh.d.snapshot.security_updates, ['openssl', 'libssl3t64', 'tzdata']);
+
+  const passedBy = run(working, { at: YESTERDAY, security_updates: ['openssl', 'curl'] });
+  assert.deepEqual(passedBy.texts, ["warn 3 security updates waiting; openssl was already waiting at the last report, so the automatic updates aren't installing it."]);
+
+  assert.match(run({ ...working, enabled: false }).texts[0], /^warn 3 security updates waiting, and automatic security updates are off\.$/);
+  assert.match(run({ ...working, last_ok: false }).texts[0], /^warn 3 security updates waiting; the last automatic run \(Wed 4 Nov 2026, 05:23 GMT\) logged an error\.$/);
+  assert.match(run({ ...working, last_run: '2026-11-02T05:00:00Z' }).texts[0], /^warn 3 security updates waiting; the automatic updates last ran Mon 2 Nov 2026, 05:00 GMT\.$/);
+  assert.match(run({ enabled: true, last_run: null, last_ok: null }).texts[0], /^warn 3 security updates waiting, and no automatic update run is recorded\.$/);
+  // A collector from before this change sends no `auto`: the old warning.
+  assert.match(run(undefined).texts[0], /^warn 3 security updates waiting\.$/);
+});
+
 test('failed backup runs, restarted containers and a full disk are reported', () => {
   const first = buildDigest(input(), new Date(YESTERDAY));
   const d = buildDigest(

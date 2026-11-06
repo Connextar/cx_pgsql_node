@@ -148,9 +148,27 @@ _rpt_jobs() { # since
     jq -sc .
 }
 
+# Upgradable packages, the security ones by name (so the next report can tell one still waiting a day later),
+# and the automatic security updates: on or off (AUTO_SECURITY_UPDATES), and when unattended-upgrades last
+# started and whether that run logged an ERROR. Debian's apt-daily-upgrade.timer runs it between 06:00 and
+# 07:00, so an update released during the day is usually still waiting when this report runs at 06:00.
 _rpt_updates() {
+  local log=/var/log/unattended-upgrades/unattended-upgrades.log started='' ok='' at=null
+  if [[ -r "$log" ]]; then
+    read -r started ok < <(cat "$log.1" "$log" 2>/dev/null | awk '
+      / INFO Starting unattended upgrades script/ { t = substr($0, 1, 19); err = 0; next }
+      t != "" && / (ERROR|CRITICAL) / { err = 1 }
+      END { if (t != "") print substr(t, 1, 10) "T" substr(t, 12), (err ? "false" : "true") }') || true
+  fi
+  [[ -n "$started" ]] && at=$(date -u -d "${started/T/ }" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null | jq -R .) && [[ -n "$at" ]] || at=null
   apt list --upgradable 2>/dev/null | awk -F/ 'NR > 1 && NF > 1 { print $1 "\t" $2 }' |
-    jq -Rsc 'split("\n") | map(select(length > 0) | split("\t")) | {total: length, security: (map(select(.[1] | test("security"))) | length), packages: (map(.[0]) | .[:15])}'
+    jq -Rsc --argjson enabled "$(is_true "${AUTO_SECURITY_UPDATES:-false}" && echo true || echo false)" \
+      --argjson at "$at" --argjson ok "${ok:-null}" '
+      split("\n") | map(select(length > 0) | split("\t")) as $rows
+      | {total: ($rows | length), security: ($rows | map(select(.[1] | test("security"))) | length),
+         packages: ($rows | map(.[0]) | .[:15]),
+         security_packages: ($rows | map(select(.[1] | test("security")) | .[0]) | .[:50]),
+         auto: {enabled: $enabled, last_run: $at, last_ok: (if $at == null then null else $ok end)}}'
 }
 
 _rpt_dropbox() {

@@ -215,8 +215,27 @@ export function buildDigest(input, nowArg) {
     if (host.reboot_scheduled) issue('info', 'Server', `A reboot is pending${why} and booked for ${formatWhen(host.reboot_scheduled, cfg.timezone)}.`);
     else issue('warn', 'Server', `A reboot is pending${why} and nothing has booked it.`);
   }
-  if (updates && n(updates.security) > 0) issue('warn', 'Server', `${updates.security} security update${updates.security === 1 ? '' : 's'} waiting.`);
-  else if (updates && n(updates.total) > 0) issue('info', 'Server', `${updates.total} package update${updates.total === 1 ? '' : 's'} waiting (none marked security).`);
+  // Security updates: with the automatic updates on and working, an update released during the day waits for
+  // tomorrow's run (06:00–07:00) — a note. A warning when they're off, when the last run logged an error or is
+  // over 36 hours old, or when a package was already waiting at the last report (the run passed it by).
+  const securityNow = Array.isArray(updates?.security_packages) ? updates.security_packages.filter((p) => typeof p === 'string') : [];
+  const securityBefore = new Set(Array.isArray(prev?.security_updates) ? prev.security_updates : []);
+  const stillWaiting = securityNow.filter((p) => securityBefore.has(p));
+  const auto = isObj(updates?.auto) ? updates.auto : null;
+  if (updates && n(updates.security) > 0) {
+    const count = `${updates.security} security update${updates.security === 1 ? '' : 's'} waiting`;
+    const lastRun = auto?.last_run ? Date.parse(auto.last_run) : NaN;
+    const lastRunWhen = Number.isFinite(lastRun) ? formatWhen(auto.last_run, cfg.timezone) : null;
+    if (!auto) issue('warn', 'Server', `${count}.`);
+    else if (!auto.enabled) issue('warn', 'Server', `${count}, and automatic security updates are off.`);
+    else if (stillWaiting.length) {
+      const names = `${stillWaiting.slice(0, 4).join(', ')}${stillWaiting.length > 4 ? ` and ${stillWaiting.length - 4} more` : ''}`;
+      issue('warn', 'Server', `${count}; ${names} ${stillWaiting.length === 1 ? 'was' : 'were'} already waiting at the last report, so the automatic updates aren't installing ${stillWaiting.length === 1 ? 'it' : 'them'}.`);
+    } else if (!Number.isFinite(lastRun)) issue('warn', 'Server', `${count}, and no automatic update run is recorded.`);
+    else if (auto.last_ok === false) issue('warn', 'Server', `${count}; the last automatic run (${lastRunWhen}) logged an error.`);
+    else if (now.getTime() - lastRun > 36 * 3600_000) issue('warn', 'Server', `${count}; the automatic updates last ran ${lastRunWhen}.`);
+    else issue('info', 'Server', `${count}; the automatic security updates install ${updates.security === 1 ? 'it' : 'them'} on their next run (last run ${lastRunWhen}, no errors).`);
+  } else if (updates && n(updates.total) > 0) issue('info', 'Server', `${updates.total} package update${updates.total === 1 ? '' : 's'} waiting (none marked security).`);
 
   const containers = (Array.isArray(host.containers) ? host.containers : []).map((c) => {
     const restartsBefore = prev?.containers?.[c.name];
@@ -557,6 +576,7 @@ export function buildDigest(input, nowArg) {
     buckets: store && isObj(store.buckets) ? Object.fromEntries(Object.entries(store.buckets).map(([k, b]) => [k, { bytes: n(b.bytes), objects: n(b.objects) }])) : {},
     usage: isObj(host.usage) ? host.usage : {},
     containers: Object.fromEntries(containers.map((c) => [c.name, n(c.restarts)])),
+    security_updates: securityNow,
   };
 
   return { status: overall, subject, preheader, issues, model, snapshot };

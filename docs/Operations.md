@@ -42,6 +42,11 @@ server emails `REPORT_TO` (`server-logs@connextar.com`) a summary of the last da
   it ended, cancelled windows aside) are a note instead, marked "during planned maintenance": a reboot's
   shutdown ends every open connection with "terminating connection due to administrator command".
   `PANIC` is a failure wherever it falls.
+  Security updates waiting are a note while the automatic security updates are on and working: Debian
+  installs them between 06:00 and 07:00, so one released during the day is still waiting when the report
+  runs. They're a warning when the automatic updates are off, when their last run logged an `ERROR` or is
+  over 36 hours old, or when a package was already waiting at the previous report (the run passed it by —
+  held back, or needing a hand).
 - **Server**: each disk (used / free / total), space by area (Postgres data, dumps, pgBackRest, object
   store), uptime, load, memory, swap, updates waiting, reboot pending, certificate, SSH logins and
   fail2ban per jail, every container's state.

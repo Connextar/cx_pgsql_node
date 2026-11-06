@@ -64,6 +64,9 @@ pglog=$(STACK_LOGS_DIR="$t/logs" MAINTENANCE_DIR="$t/mnt" bash -c 'source /opt/c
 check "shutdown FATAL inside a window marked planned, the same outside one not" \
   jq -e '[.errors[] | select(.severity == "FATAL") | .planned] | sort == [false, true]' <<<"$pglog"
 rm -rf "${t:?}"
+updates=$(bash -c 'set -a; source /opt/cx-pgsql/config/server.env.sample; source /opt/cx-pgsql/config/server.env; set +a; source /opt/cx-pgsql/lib/core.sh; source /opt/cx-pgsql/lib/report.sh; _rpt_updates' 2>/dev/null)
+check "updates: automatic security updates on, security packages listed by name" \
+  jq -e '.auto.enabled == true and (.security_packages | type == "array") and (.security_packages | length) == .security' <<<"$updates"
 
 echo "passed $pass, failed $failed"
 ((failed == 0))
