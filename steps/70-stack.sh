@@ -294,6 +294,15 @@ stack_check() {
     chk "$svc running and healthy" _stack_container_healthy "${STACK_NAME}-$svc"
   done
   chk "containers match their configuration" _stack_up_to_date
+  for svc in "${_STACK_BUILT[@]}"; do
+    # A Postgres image left for a window is a warning: the apply goes on with the other steps, and each
+    # apply says so again until one runs with PG_ALLOW_AUTO_RESTART=true.
+    if [[ $svc == postgres ]] && ! is_true "$PG_ALLOW_AUTO_RESTART"; then
+      chk_soft "$svc image built from the deployed files" _stack_image_current "$svc"
+    else
+      chk "$svc image built from the deployed files" _stack_image_current "$svc"
+    fi
+  done
   chk_soft "every container starts again after a reboot" _stack_all_restart
   chk "no setting waiting for a restart" _stack_no_pending_restart
   chk "cluster roles (cx_monitor, pgbouncer_auth) and pg_stat_statements" _stack_cluster_roles_ok
@@ -320,6 +329,57 @@ _stack_sources_in_sync() {
   cmp -s "$PROJECT_DIR/stack/compose.yml" "$STACK_DIR/compose.yml" &&
     cmp -s "$PROJECT_DIR/stack/postgres/Dockerfile" "$STACK_DIR/postgres/Dockerfile" &&
     cmp -s "$PROJECT_DIR/stack/pgbouncer/Dockerfile" "$STACK_DIR/pgbouncer/Dockerfile"
+}
+
+# ─── Images ─────────────────────────────────────────────────────────────────────────
+# An image is built only when what it's made from changed, never "to be sure". On 6 Nov 2026 an apply that
+# changed only the health service rebuilt Postgres and PgBouncer from scratch (Docker had dropped its build
+# cache), the new image ids made compose replace both containers, and Postgres went down for a few seconds
+# with no window booked. A stamp per image, "<inputs> <image id>", says what the current image was built from.
+_STACK_BUILT=(postgres pgbouncer health)
+_stack_image() { _compose config --format json 2>/dev/null | jq -er --arg s "$1" '.services[$s].image'; }
+_stack_image_id() { docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true; }
+# The build context's files (as deployed) and the build arguments, as one hash; "none" for no directory.
+_stack_build_inputs() {
+  [[ -d "$1" ]] || { echo none; return 0; }
+  {
+    printf 'PG_VERSION=%s PG_IMAGE_VARIANT=%s\n' "$PG_VERSION" "$PG_IMAGE_VARIANT"
+    (cd "$1" && find . -type f -not -path './node_modules/*' -not -path './test/*' -print0 | LC_ALL=C sort -z | xargs -0r sha256sum)
+  } | sha256sum | cut -d' ' -f1
+}
+_stack_stamp() { printf '%s/state/image-%s' "$STACK_DIR" "$1"; }
+# The service's image exists and was built from what's deployed now.
+_stack_image_current() {
+  local image stamp
+  image=$(_stack_image "$1") || return 1
+  stamp=$(_stack_stamp "$1")
+  [[ -f "$stamp" && "$(<"$stamp")" == "$(_stack_build_inputs "$STACK_DIR/$1") $(_stack_image_id "$image")" ]]
+}
+_stack_write_stamp() {
+  install -d -m 0755 "$STACK_DIR/state"
+  printf '%s %s\n' "$(_stack_build_inputs "$STACK_DIR/$1")" "$(_stack_image_id "$(_stack_image "$1")")" >"$(_stack_stamp "$1")"
+}
+# Build the images that aren't current. A new Postgres image replaces the running database, so while it runs
+# that's a restart: it waits for PG_ALLOW_AUTO_RESTART, as a setting that needs one does.
+_stack_build() {
+  local svc build=() left=0
+  for svc in "${_STACK_BUILT[@]}"; do
+    if _stack_image_current "$svc"; then continue; fi
+    if [[ $svc == postgres ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>&1 && ! is_true "$PG_ALLOW_AUTO_RESTART"; then
+      warn "Postgres's image is out of date (its Dockerfile changed): a new one replaces the running database, a few seconds offline. Not built."
+      warn "Book a window (cx-pgsql maintenance plan \"<when>\" 15m) and apply in it with PG_ALLOW_AUTO_RESTART=true in config/server.env."
+      left=1
+      continue
+    fi
+    build+=("$svc")
+  done
+  if ((${#build[@]} == 0)); then
+    info "$( ((left)) && echo "The other images are current" || echo "Images are current"): nothing to build"
+    return 0
+  fi
+  info "Building: ${build[*]} (the first run pulls the base images)"
+  _compose build --quiet "${build[@]}"
+  for svc in "${build[@]}"; do _stack_write_stamp "$svc"; done
 }
 
 _stack_cluster_sql() {
@@ -368,6 +428,11 @@ stack_apply() {
   [[ -f "$STACK_DIR/config/postgres/conf.d/local.conf" ]] ||
     printf '# Your own postgresql.conf overrides (read last; never overwritten by the setup).\n' >"$STACK_DIR/config/postgres/conf.d/local.conf"
 
+  # What each image was made from before this apply (for images built before there were stamps).
+  local svc
+  local -A was=()
+  for svc in "${_STACK_BUILT[@]}"; do was[$svc]=$(_stack_build_inputs "$STACK_DIR/$svc"); done
+
   # Sources.
   rsync -a --delete --exclude node_modules --exclude test "$PROJECT_DIR/stack/health/" "$STACK_DIR/health/"
   install -m 0644 "$PROJECT_DIR/stack/compose.yml" "$STACK_DIR/compose.yml"
@@ -397,9 +462,17 @@ stack_apply() {
     fi
   done < <(_stack_files)
 
+  # Images from before stamps: current, if they exist and this apply didn't change what they're made from.
+  for svc in "${_STACK_BUILT[@]}"; do
+    if [[ ! -f "$(_stack_stamp "$svc")" && "${was[$svc]}" != none &&
+      "${was[$svc]}" == "$(_stack_build_inputs "$STACK_DIR/$svc")" && -n "$(_stack_image_id "$(_stack_image "$svc")")" ]]; then
+      _stack_write_stamp "$svc"
+      info "Recorded the $svc image as current"
+    fi
+  done
+
   # Containers: Postgres first, then its own roles (and n8n's database), then everything else.
-  info "Building images and starting the stack (first run pulls the base images)"
-  _compose build --quiet
+  _stack_build
   _stack_up postgres
   _stack_cluster_sql | pg_sql -d postgres
   pg_login_ok cx_monitor postgres cx-monitor-password 127.0.0.1 "$PG_DIRECT_PORT" || pg_set_password cx_monitor cx-monitor-password

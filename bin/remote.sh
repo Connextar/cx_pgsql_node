@@ -55,6 +55,14 @@ BOOTSTRAP_SSH_USER=${BOOTSTRAP_SSH_USER:-root}
 BOOTSTRAP_SSH_PORT=${BOOTSTRAP_SSH_PORT:-22}
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
 [[ -n "${REMOTE_SSH_IDENTITY:-}" ]] && SSH_OPTS+=(-i "$REMOTE_SSH_IDENTITY" -o IdentitiesOnly=yes)
+# ssh without this machine's locale. macOS sends LANG and LC_* (SendEnv in its ssh_config, which a -o
+# can't take back) and Terminal sets LC_CTYPE=UTF-8 — no locale on Debian, so every login file that
+# reads it printed "setlocale: LC_CTYPE: cannot change locale". Unset, the server uses its own LOCALE.
+_ssh() {
+  local unset=() v
+  for v in $(compgen -e); do [[ $v == LANG || $v == LC_* ]] && unset+=(-u "$v"); done
+  env ${unset[@]+"${unset[@]}"} ssh "$@" # the guard: bash 3.2 calls an empty array unbound under set -u
+}
 
 say() { printf '› %s\n' "$*"; }
 ok() { printf '✓ %s\n' "$*"; }
@@ -63,9 +71,9 @@ warn() { printf '! %s\n' "$*" >&2; }
 
 # Pick the way in: the hardened one if it works, else the bootstrap one.
 pick_target() {
-  if ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=6 -p "$SSH_PORT" "$ADMIN_USER@$HOST" true 2>/dev/null; then
+  if _ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=6 -p "$SSH_PORT" "$ADMIN_USER@$HOST" true 2>/dev/null; then
     T_USER=$ADMIN_USER T_PORT=$SSH_PORT
-  elif ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=6 -p "$BOOTSTRAP_SSH_PORT" "$BOOTSTRAP_SSH_USER@$HOST" true 2>/dev/null; then
+  elif _ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=6 -p "$BOOTSTRAP_SSH_PORT" "$BOOTSTRAP_SSH_USER@$HOST" true 2>/dev/null; then
     T_USER=$BOOTSTRAP_SSH_USER T_PORT=$BOOTSTRAP_SSH_PORT
     say "Using the bootstrap login $T_USER@$HOST:$T_PORT"
   else
@@ -74,8 +82,8 @@ pick_target() {
   SUDO=""
   [[ "$T_USER" == root ]] || SUDO="sudo"
 }
-rssh() { ssh "${SSH_OPTS[@]}" -p "$T_PORT" "$T_USER@$HOST" "$@"; }
-rssh_t() { ssh -t "${SSH_OPTS[@]}" -p "$T_PORT" "$T_USER@$HOST" "$@"; }
+rssh() { _ssh "${SSH_OPTS[@]}" -p "$T_PORT" "$T_USER@$HOST" "$@"; }
+rssh_t() { _ssh -t "${SSH_OPTS[@]}" -p "$T_PORT" "$T_USER@$HOST" "$@"; }
 
 cmd_sync() {
   pick_target
@@ -92,8 +100,8 @@ remote_setup() { rssh_t "$SUDO $INSTALL_DIR/setup.sh $*"; }
 # After a run, SSH/firewall changes wait for confirmation from a NEW connection on the new path
 # (ADMIN_USER on SSH_PORT): reaching it that way is the proof the change didn't lock us out.
 confirm_from_new_connection() {
-  local new=(ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" "$ADMIN_USER@$HOST")
-  local old=(ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$BOOTSTRAP_SSH_PORT" "$BOOTSTRAP_SSH_USER@$HOST")
+  local new=(_ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$SSH_PORT" "$ADMIN_USER@$HOST")
+  local old=(_ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=8 -p "$BOOTSTRAP_SSH_PORT" "$BOOTSTRAP_SSH_USER@$HOST")
   local probe="test -s /run/cx-pgsql/rollback-pending" rc=0 _
   # ssh exits 255 when it can't connect; otherwise with the command's status (1 = nothing pending).
   # Retried: OpenSSH 10 refuses an address for a few seconds after a stalled connection from it.
@@ -309,7 +317,7 @@ case $CMD in
     pick_target
     lp=${1:-$PG_DIRECT_PORT} rp=${2:-$PG_DIRECT_PORT}
     say "localhost:$lp → $HOST 127.0.0.1:$rp (Ctrl-C to close)"
-    ssh "${SSH_OPTS[@]}" -N -L "$lp:127.0.0.1:$rp" -p "$T_PORT" "$T_USER@$HOST"
+    _ssh "${SSH_OPTS[@]}" -N -L "$lp:127.0.0.1:$rp" -p "$T_PORT" "$T_USER@$HOST"
     ;;
   dropbox-auth) cmd_dropbox_auth "$@" ;;
   point-vercel) cmd_point_vercel "$@" ;;

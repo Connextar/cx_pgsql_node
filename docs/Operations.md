@@ -259,6 +259,13 @@ settings that need a restart are reported (`stack` shows "setting waiting for a 
 with `cx-pgsql restart postgres` at a quiet moment, or set `PG_ALLOW_AUTO_RESTART=true`. Your own
 `postgresql.conf` overrides go in `$STACK_DIR/config/postgres/conf.d/local.conf`, which is never overwritten.
 
+Images are built only when what they're made from changed: a stamp per image in `$STACK_DIR/state/`
+records its build files, build arguments and image id, and the `stack` step checks it ("image built from
+the deployed files"). Rebuilding "to be sure" once replaced Postgres for nothing (6 November 2026: Docker
+had dropped its build cache, the rebuild gave new image ids, compose replaced the containers). A changed
+Postgres image replaces the running database, so the apply treats it as a restart: it warns and keeps the
+old one until you apply with `PG_ALLOW_AUTO_RESTART=true`, in a window you've booked.
+
 **Upgrading Postgres to a new major version** is deliberate, not a config change:
 
 1. `cx-pgsql backup run` (fresh dumps, uploaded).
