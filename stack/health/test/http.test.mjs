@@ -66,7 +66,8 @@ test('/healthz answers 503 with names and states only when PostgreSQL is down', 
   assert.equal(res.headers.get('cache-control'), 'no-store');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
   const body = await res.json();
-  assert.deepEqual(Object.keys(body).sort(), ['checks', 'status', 'time']);
+  assert.deepEqual(Object.keys(body).sort(), ['checks', 'serving', 'status', 'time']);
+  assert.equal(body.serving, 'fail');
   assert.equal(body.status, 'fail');
   assert.equal(body.checks.postgres_connect, 'fail');
   assert.equal(body.checks.tls_cert, 'ok');

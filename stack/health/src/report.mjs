@@ -36,11 +36,29 @@ export function makeCheck(name, status, message, value) {
   return value === null || value === undefined ? { name, status, message } : { name, status, message, value };
 }
 
+/**
+ * The checks without which the apps on this server can't work: only these make /healthz answer 503, so an uptime
+ * monitor pages for downtime and nothing else. A stale backup, a certificate running out or a slow query is a
+ * problem for the nightly report and /status — on 15 Nov 2026 a Dropbox rate limit held the off-site copy up for
+ * three hours, and /healthz answered 503 for 51 minutes while Postgres served every request.
+ */
+export const SERVING_CHECKS = Object.freeze(['postgres_connect', 'pgbouncer_connect', 'connections', 'disk', 'objects']);
+
+/** The worst state among the serving checks ('ok' when none ran). */
+export function servingStatus(report) {
+  return worstStatus(report.checks.filter((c) => SERVING_CHECKS.includes(String(c.name))).map((c) => c.status));
+}
+
 /** The public /healthz body: names and states only — no messages, numbers or report sections. */
 export function healthzView(report) {
   const checks = {};
   for (const c of report.checks) checks[String(c.name)] = RANK[c.status] === undefined ? 'fail' : c.status;
-  return { status: RANK[report.status] === undefined ? 'fail' : report.status, time: report.time, checks };
+  return {
+    status: RANK[report.status] === undefined ? 'fail' : report.status,
+    serving: servingStatus(report),
+    time: report.time,
+    checks,
+  };
 }
 
 // ---------------------------------------------------------------- formatting

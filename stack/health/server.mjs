@@ -5,7 +5,7 @@ import { ConfigError, describeConfig, loadConfig } from './src/config.mjs';
 import { maintenanceFeed } from './src/maintenance.mjs';
 import { CONTENT_TYPE as METRICS_TYPE, renderMetrics } from './src/metrics.mjs';
 import { PG_SECTIONS, createPools, probeHost, probeObjects, probePgbouncer, probePostgres, readBackupStatus, readCertificate } from './src/probes.mjs';
-import { buildReport, healthzView, makeCheck } from './src/report.mjs';
+import { buildReport, healthzView, makeCheck, servingStatus } from './src/report.mjs';
 import { ProbeErrorLog, bearerToken, errorMessage, log, tokensEqual } from './src/util.mjs';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
@@ -115,7 +115,8 @@ async function route(req, res) {
 
   if (path === '/healthz') {
     const report = await getReport();
-    return send(req, res, report.status === 'fail' ? 503 : 200, healthzView(report));
+    // 503 only when the server can't serve (SERVING_CHECKS); `status` in the body still says the worst of everything.
+    return send(req, res, servingStatus(report) === 'fail' ? 503 : 200, healthzView(report));
   }
 
   if (path === '/maintenance.json') {

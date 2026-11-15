@@ -199,6 +199,9 @@ repo1-cipher-type=aes-256-cbc
 repo1-cipher-pass=$(secret pgbackrest-cipher-pass 64)
 compress-type=zst
 compress-level=3
+# Small files packed into bundles: a full backup was ~2,000 files, and expiring a fortnight of them meant
+# thousands of deletes on Dropbox, which rate-limited the upload for three hours (15 Nov 2026).
+repo1-bundle=y
 process-max=2
 start-fast=y
 archive-async=n

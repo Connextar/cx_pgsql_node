@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildReport, evaluateBackupSection, evaluateBackups, evaluateCert, evaluateWalArchive, healthzView,
+  SERVING_CHECKS, servingStatus, buildReport, evaluateBackupSection, evaluateBackups, evaluateCert, evaluateWalArchive, healthzView,
   overallStatus, thresholdStatus, worstStatus, XID_FAIL_AGE, XID_WARN_AGE,
 } from '../src/report.mjs';
 import { NOW, byName, healthyProbes, statusFixture, testConfig, unreachableProbes } from './helpers.mjs';
@@ -322,6 +322,26 @@ describe('tls_cert', () => {
 });
 
 describe('/healthz redaction', () => {
+  test('serving: a stale off-site copy is a fail in status but not downtime; a serving check failing is', () => {
+    // 15 Nov 2026: the objects copy 3.4 h old (limit 3 h) while Postgres answered every request.
+    const p = healthyProbes();
+    const stale = buildReport(p, cfg, NOW);
+    stale.checks.push({ name: 'backup_objects', status: 'fail', message: 'last successful off-site object copy was 3.4 h ago (limit 3 h)' });
+    stale.status = 'fail';
+    assert.equal(servingStatus(stale), 'ok');
+    assert.equal(healthzView(stale).status, 'fail');
+    assert.equal(healthzView(stale).serving, 'ok');
+
+    for (const name of SERVING_CHECKS) {
+      const down = buildReport(healthyProbes(), cfg, NOW);
+      down.checks = down.checks.filter((c) => c.name !== name).concat([{ name, status: 'fail', message: 'x' }]);
+      assert.equal(servingStatus(down), 'fail', name);
+    }
+    const warned = buildReport(healthyProbes(), cfg, NOW);
+    warned.checks.push({ name: 'disk', status: 'warn', message: 'x' });
+    assert.equal(servingStatus(warned), 'warn');
+  });
+
   test('only names and states leave the public endpoint', () => {
     const p = healthyProbes();
     p.postgres.error = 'SECRET-connection-detail';
@@ -331,8 +351,9 @@ describe('/healthz redaction', () => {
     const report = buildReport(p, cfg, NOW);
     const view = healthzView(report);
 
-    assert.deepEqual(Object.keys(view).sort(), ['checks', 'status', 'time']);
+    assert.deepEqual(Object.keys(view).sort(), ['checks', 'serving', 'status', 'time']);
     assert.equal(view.status, 'fail');
+    assert.equal(view.serving, 'fail');
     assert.equal(view.time, NOW.toISOString());
     assert.deepEqual(Object.keys(view.checks), report.checks.map((c) => c.name));
     for (const state of Object.values(view.checks)) assert.ok(['ok', 'warn', 'fail'].includes(state));

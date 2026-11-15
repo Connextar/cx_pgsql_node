@@ -448,7 +448,9 @@ _verify_objects() {
       [[ -n "$f" ]] || continue
       read=$((read + 1))
       rclone_x cat "cxcrypt:deleted/$f" >/dev/null 2>&1 || { err "Deleted object can't be read back: deleted/$f"; unreadable=$((unreadable + 1)); }
-    done < <(rclone_x lsf -R --files-only cxcrypt:deleted 2>/dev/null | shuf -n "$OBJECTS_VERIFY_SAMPLE")
+    # No deleted/ yet (nothing deleted since the copy began) is an empty list, not an error: a failing lsf here
+    # tripped the error trap inside the substitution and logged "Failed at …: shuf" from a verify that passed.
+    done < <({ rclone_x lsf -R --files-only cxcrypt:deleted 2>/dev/null || true; } | shuf -n "$OBJECTS_VERIFY_SAMPLE")
     ((unreadable)) && bad=1
     ((read == 0 || unreadable)) || ok "Deleted objects: $read read back and intact"
     results=$(jq --argjson n "$read" --argjson ok "$( ((unreadable)) && echo false || echo true)" \
