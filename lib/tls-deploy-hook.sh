@@ -9,6 +9,8 @@ export PROJECT_DIR
 source "$PROJECT_DIR/lib/core.sh"
 # shellcheck source=lib/tls.sh
 source "$PROJECT_DIR/lib/tls.sh"
+# shellcheck source=lib/apps.sh
+source "$PROJECT_DIR/lib/apps.sh"
 load_config
 tls_sync || true
 tls_reload_services

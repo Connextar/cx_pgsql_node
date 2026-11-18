@@ -9,6 +9,8 @@ tls_domains() {
   printf '%s\n' "$SERVER_FQDN"
   is_true "$ENABLE_N8N" && printf '%s\n' "$N8N_FQDN"
   is_true "$ENABLE_OBJECTS" && printf '%s\n' "$OBJECTS_FQDN"
+  # The apps in config/apps/ (lib/apps.sh), each on a name of its own.
+  declare -F app_fqdns >/dev/null && app_fqdns
   return 0
 }
 

@@ -5,7 +5,7 @@
 NGINX_SITES=/etc/nginx/sites-available
 NGINX_ENABLED=/etc/nginx/sites-enabled
 
-nginx_describe() { echo "nginx: https://$SERVER_FQDN/healthz|status|metrics → health service$(is_true "$ENABLE_OBJECTS" && printf '; https://%s → object store' "$OBJECTS_FQDN"); certbot"; }
+nginx_describe() { echo "nginx: https://$SERVER_FQDN/healthz|status|metrics → health service$(is_true "$ENABLE_OBJECTS" && printf '; https://%s → object store' "$OBJECTS_FQDN")$(apps_any && printf '; %s → apps' "$(app_fqdns | tr '\n' ' ' | sed 's/ $//')"); certbot"; }
 
 _nginx_common() {
   cat <<'EOF'
@@ -23,6 +23,13 @@ EOF
   # The object store's own limit (per address; Vercel's functions share theirs, so it's generous).
   if is_true "$ENABLE_OBJECTS"; then
     printf 'limit_req_zone $binary_remote_addr zone=cx_objects:10m rate=%s;\n' "$OBJECTS_RATE_LIMIT"
+  fi
+  # The apps in config/apps/: a request limit each, and the Connection header a WebSocket upgrade needs.
+  if apps_any; then
+    app_each _nginx_app_zone
+    if apps_any_websocket; then
+      printf 'map $http_upgrade $cx_connection_upgrade {\n\tdefault upgrade;\n\t"" close;\n}\n'
+    fi
   fi
   return 0
 }
@@ -160,6 +167,78 @@ $(_nginx_tls_lines "$OBJECTS_FQDN")
 EOF
 }
 
+# An app from config/apps/ (lib/apps.sh): TLS here, then its container on loopback. A WebSocket app
+# keeps a connection up to an hour (a call through the voice relay lasts no longer).
+_nginx_app_zone_name() { printf 'cx_app_%s' "${APP_NAME//-/_}"; }
+_nginx_app_zone() { printf 'limit_req_zone $binary_remote_addr zone=%s:10m rate=%s;\n' "$(_nginx_app_zone_name)" "$APP_RATE_LIMIT"; }
+_nginx_app_file() { printf 'cx-app-%s.conf' "$APP_NAME"; }
+_nginx_app_site() {
+  local timeout=60s
+  app_websocket && timeout=3600s
+  printf '# Managed by CX_PGSQL_Node_1 setup (steps/60-nginx.sh) from config/apps/%s.env.\n' "$APP_NAME"
+  _nginx_http_block "$APP_FQDN"
+  cat <<EOF
+server {
+	listen 443 ssl;
+	listen [::]:443 ssl;
+	server_name $APP_FQDN;
+$(_nginx_tls_lines "$APP_FQDN")
+	access_log /var/log/nginx/cx-app-$APP_NAME.access.log;
+	client_max_body_size 1m;
+
+	location / {
+		limit_req zone=$(_nginx_app_zone_name) burst=$APP_RATE_BURST nodelay;
+		proxy_pass http://127.0.0.1:$APP_PORT;
+		proxy_http_version 1.1;
+EOF
+  if app_websocket; then
+    printf '\t\tproxy_set_header Upgrade $http_upgrade;\n\t\tproxy_set_header Connection $cx_connection_upgrade;\n\t\tproxy_buffering off;\n'
+  else
+    printf '\t\tproxy_set_header Connection "";\n'
+  fi
+  cat <<EOF
+		proxy_set_header Host \$host;
+		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_read_timeout $timeout;
+		proxy_send_timeout $timeout;
+	}
+}
+EOF
+}
+# One app's items, counted from zero and handed back to the parent shell (app_each runs a subshell).
+_nginx_app_check() {
+  check_begin
+  chk_render "site $APP_FQDN ($APP_NAME)" "$NGINX_SITES/$(_nginx_app_file)" _nginx_app_site
+  chk "site $APP_FQDN enabled" _nginx_linked "$(_nginx_app_file)"
+  printf '%s\t%s\t' "$CHECK_PASS" "$CHECK_FAIL"
+  printf '%s\x1f' "${CHECK_LINES[@]}"
+  printf '\n'
+}
+_nginx_apps_check() {
+  local pass fail lines l IFS
+  while IFS=$'\t' read -r pass fail lines; do
+    CHECK_PASS=$((CHECK_PASS + pass))
+    CHECK_FAIL=$((CHECK_FAIL + fail))
+    IFS=$'\x1f'
+    for l in $lines; do [[ -n "$l" ]] && CHECK_LINES+=("$l"); done
+    unset IFS
+  done < <(app_each _nginx_app_check)
+}
+_nginx_app_apply() {
+  _nginx_app_site | write_if_changed "$NGINX_SITES/$(_nginx_app_file)" || true
+  _nginx_enable "$(_nginx_app_file)"
+}
+# Sites of apps no longer in config/apps/.
+_nginx_stale_app_sites() {
+  local want f
+  want=" $(app_names 2>/dev/null | sed 's/^/cx-app-/; s/$/.conf/' | tr '\n' ' ') "
+  for f in "$NGINX_SITES"/cx-app-*.conf "$NGINX_ENABLED"/cx-app-*.conf; do
+    [[ -e "$f" || -L "$f" ]] || continue
+    [[ "$want" == *" ${f##*/} "* ]] || printf '%s\n' "$f"
+  done
+}
+
 _nginx_linked() { [[ "$(readlink -f "$NGINX_ENABLED/$1")" == "$NGINX_SITES/$1" ]]; }
 
 nginx_check() {
@@ -177,6 +256,8 @@ nginx_check() {
     chk_render "site $OBJECTS_FQDN (object store)" "$NGINX_SITES/$OBJECTS_FQDN.conf" _nginx_objects_site
     chk "site $OBJECTS_FQDN enabled" _nginx_linked "$OBJECTS_FQDN.conf"
   fi
+  apps_any && _nginx_apps_check
+  chk "no site left for an app no longer in config/apps/" test -z "$(_nginx_stale_app_sites)"
   chk "nginx -t" nginx -t -q
   chk "nginx running and enabled" sh -c 'systemctl is-active --quiet nginx && systemctl is-enabled --quiet nginx'
 }
@@ -210,6 +291,9 @@ nginx_apply() {
     rm -f "$NGINX_ENABLED/$OBJECTS_FQDN.conf"
   fi
 
+  if apps_any; then app_each _nginx_app_apply; fi
+  _nginx_stale_app_sites | xargs -r rm -f
+
   # From the runbook: the apps group may edit nginx sites and read its logs.
   local d
   for d in /var/log/nginx /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/snippets; do
@@ -226,7 +310,8 @@ nginx_teardown() {
   rm -f "$NGINX_ENABLED/$SERVER_FQDN.conf" "$NGINX_SITES/$SERVER_FQDN.conf" \
     "$NGINX_ENABLED/$N8N_FQDN.conf" "$NGINX_SITES/$N8N_FQDN.conf" \
     "$NGINX_ENABLED/$OBJECTS_FQDN.conf" "$NGINX_SITES/$OBJECTS_FQDN.conf" \
-    "$NGINX_ENABLED/00-cx-default.conf" "$NGINX_SITES/00-cx-default.conf" /etc/nginx/conf.d/00-cx.conf
+    "$NGINX_ENABLED/00-cx-default.conf" "$NGINX_SITES/00-cx-default.conf" /etc/nginx/conf.d/00-cx.conf \
+    "$NGINX_ENABLED"/cx-app-*.conf "$NGINX_SITES"/cx-app-*.conf
   [[ -e "$NGINX_SITES/default" && ! -e "$NGINX_ENABLED/default" ]] && ln -s "$NGINX_SITES/default" "$NGINX_ENABLED/default"
   nginx -t -q 2>/dev/null && systemctl reload nginx 2>/dev/null || true
 }

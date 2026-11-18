@@ -143,3 +143,42 @@ holds the checks; run it after an apply: `tests/vps.sh exec bash -s < tests/main
   - `lib/maintenance.sh` read `$MAINTENANCE_DIR` before the config was loaded, so every unit failed.
   - Boot time came from `/proc/uptime`, which inside a container is the host's. It now comes from PID 1's age.
   - The settle job went on waiting after its window had been ended.
+
+## App containers (2026-11-18)
+
+`steps/95-apps.sh` (docs/Apps.md) on Debian 13, with the test config plus one app,
+`config/apps/cx-support-relay.env` from `example.env.sample` with `APP_FQDN=relay-test.example.invalid` and
+`APP_REPO=/srv/git/cx-support.git`: a bare copy of cx-support with the relay's Dockerfile, put in the VPS with
+`docker cp` and `chown -R root:root` (git refuses a repository owned by another user). `tests/apps-test.sh` holds the
+checks: `tests/vps.sh exec bash -s < tests/apps-test.sh`. It commits to that bare repository to test deploys.
+
+- **First apply, no secrets yet:** every database step DONE; `apps` checked out `main`, built the image and stopped,
+  naming the missing secrets and `bin/remote.sh app-secrets`. `remote.sh apply` exits 1 here, by design: nothing
+  after it is held up, because it is the last step.
+- **`bin/remote.sh app-secrets cx-support-relay --from <dotenv file>`:** reads `"…"`, `'…'` and `export` lines;
+  starts the relay (13 s once built).
+- **Final run: 62 of 62 checks passed**, then `remote.sh apply` again: `apps: already done`, nothing restarted.
+  - **Through nginx:** `/healthz` gives `ok 0.2.0 <commit>`. WebSocket upgrades: unsigned → 403, wrong signature →
+    403, Twilio-signed → 101. HTTP → 301. A one-hour proxy timeout.
+  - **Locked down:**
+    - Read-only root, no capabilities, `no-new-privileges`, uid 10010, 512 MB, 256 processes.
+    - Port on 127.0.0.1 only; its own network only.
+    - It can't reach Postgres by address or name, nor the health service's loopback port; it can reach
+      `api.anthropic.com:443`.
+    - It writes `/tmp` only.
+  - **Secrets:** 0600 files, single-quoted in `secrets.env`, never in `app.env` or `compose.yml`. `cx-pgsql app
+    secrets` shows names only. A value with a quote, two lines or an unknown name is refused.
+  - **Deploys:** a new commit on `main` is a status warning only. Apply doesn't restart; `cx-pgsql app deploy` does.
+    The previous image is kept (two at most). `rollback` returns to the old commit; deploy again moves forward.
+  - **Drift:** a stopped container, or an edited nginx site → BROKEN → `apply nginx apps` repairs both.
+  - **Config:** a second app on the same port and name is refused.
+    - With an SSH `APP_REPO` and no deploy key, the apply prints the key and where to add it. GitHub's pinned host
+      key is accepted: the refusal is "Permission denied", not a host-key error.
+    - Taking the file out removes its nginx site. certbot's deploy hook still runs.
+  - **Teardown** removes the container and images, keeps the checkout; apply brings it back.
+- **Found and fixed on the way:**
+  - Compose refuses `pids_limit` beside `deploy.resources.limits`, so it's `limits.pids`.
+  - The checkout was made root-only (`chmod -R go-rwx`). `COPY` carried that into the image, where the relay (uid
+    10010) couldn't read `package.json`, so `/healthz` lost its version. The checkout keeps git's modes now (its
+    0750 directory keeps it private), and the relay's Dockerfile makes its files readable itself. `COPY --chmod`
+    was no answer: it gives the directories it creates the same mode.

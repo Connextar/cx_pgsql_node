@@ -30,6 +30,14 @@
 #                                             build the email on the server without sending it and
 #                                             copy it here (default: report-preview.html, git-ignored);
 #                                             --notice: the planned-reboot notice instead
+#   bin/remote.sh app-key <app> [--github]    the app's read-only deploy key; --github adds it to the
+#                                             GitHub repository in APP_REPO (needs gh, signed in)
+#   bin/remote.sh app-secrets <app> [--from FILE] [NAME...]
+#                                             set the app's secrets (APP_SECRETS): asked for, not shown,
+#                                             or read from a dotenv FILE such as the app's .env.local;
+#                                             then applies, so the app starts or picks them up
+#   bin/remote.sh app-deploy <app>            fetch, build and restart the app at its APP_REF's newest
+#                                             commit (live connections drop)
 #
 # First run on a fresh VPS: connects as BOOTSTRAP_SSH_USER (root) on port 22 with your key;
 # afterwards as ADMIN_USER on SSH_PORT. Settings come from config/server.env.
@@ -303,6 +311,100 @@ cmd_objects_vercel() {
   say "Takes effect on the app's next deployment."
 }
 
+# ─── App containers (config/apps/, docs/Apps.md) ───────────────────────────────────
+# One setting of an app's config file, read in a subshell here.
+_app_setting() {
+  local app=$1 var=$2 file="config/apps/$1.env"
+  [[ -f "$file" ]] || die "No $file here."
+  (
+    set -a
+    # shellcheck source=/dev/null
+    source "$file"
+    printf '%s' "${!var:-}"
+  )
+}
+
+# NAME's value in a dotenv file (KEY=value, "value" or 'value', `export` allowed); the last one wins.
+_dotenv_get() {
+  awk -v k="$2" '
+    { line = $0; sub(/\r$/, "", line); sub(/^[ \t]*export[ \t]+/, "", line) }
+    index(line, k "=") == 1 { v = substr(line, length(k) + 2); found = 1 }
+    END {
+      if (!found) exit 1
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      printf "%s", v
+    }' "$1"
+}
+
+cmd_app_key() {
+  local app=${1:?usage: bin/remote.sh app-key <app> [--github]} github=0 key repo slug tmp
+  [[ "${2:-}" == --github ]] && github=1
+  repo=$(_app_setting "$app" APP_REPO)
+  if [[ "$repo" != ssh://* && ! "$repo" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+: ]]; then
+    say "$app's repository ($repo) isn't reached over SSH: it needs no deploy key."
+    return 0
+  fi
+  cmd_sync
+  key=$(rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql app key $(printf '%q' "$app")" | tr -d '\r' | grep '^ssh-' || true)
+  [[ -n "$key" ]] || die "No deploy key for $app (is APP_REPO an SSH URL?)."
+  printf '%s\n' "$key"
+  if ((github)); then
+    command -v gh >/dev/null || die "gh isn't installed here."
+    slug=$(printf '%s' "$repo" | sed -nE 's#^(ssh://)?git@github\.com[:/]([^/]+/[^/]+)$#\2#p' | sed 's/\.git$//')
+    [[ -n "$slug" ]] || die "APP_REPO ($repo) isn't a GitHub SSH URL."
+    tmp=$(mktemp)
+    printf '%s\n' "$key" >"$tmp"
+    gh repo deploy-key add "$tmp" --repo "$slug" --title "$SERVER_HOSTNAME $app (read-only)" ||
+      { rm -f "$tmp"; die "gh couldn't add it (already there? gh repo deploy-key list --repo $slug)"; }
+    rm -f "$tmp"
+    ok "Added to $slug as a read-only deploy key."
+  else
+    say "Add it to $repo as a read-only deploy key (GitHub: Settings → Deploy keys), or run this again with --github."
+  fi
+}
+
+cmd_app_secrets() {
+  local app=${1:?usage: bin/remote.sh app-secrets <app> [--from FILE] [NAME...]} from="" names=() name value set=0
+  shift
+  while (($#)); do
+    case $1 in
+      --from) from=${2:?--from FILE}; shift ;;
+      -*) die "Unknown option $1" ;;
+      *) names+=("$1") ;;
+    esac
+    shift
+  done
+  [[ -z "$from" || -f "$from" ]] || die "No file $from."
+  # shellcheck disable=SC2207
+  ((${#names[@]})) || names=($(_app_setting "$app" APP_SECRETS))
+  ((${#names[@]})) || die "config/apps/$app.env names no APP_SECRETS."
+  cmd_sync
+  for name in "${names[@]}"; do
+    value=""
+    if [[ -n "$from" ]]; then
+      value=$(_dotenv_get "$from" "$name" || true)
+      [[ -n "$value" ]] || { warn "$name: not in ${from##*/} (or empty) — left as it is"; continue; }
+    else
+      read -rsp "$app $name (not shown; empty keeps the current value): " value </dev/tty
+      echo
+      [[ -n "$value" ]] || continue
+    fi
+    # On stdin, never on the server's command line.
+    printf '%s\n' "$value" | rssh "$SUDO $INSTALL_DIR/bin/cx-pgsql app secret $(printf '%q %q' "$app" "$name")"
+    ok "$app: $name set"
+    set=$((set + 1))
+  done
+  ((set)) || { say "Nothing changed."; return 0; }
+  say "Applying, so $app starts with them"
+  remote_setup apply || die "The apply stopped (above): bin/remote.sh status shows what's left."
+}
+
+cmd_app_deploy() {
+  local app=${1:?usage: bin/remote.sh app-deploy <app>}
+  cmd_sync
+  rssh_t "$SUDO $INSTALL_DIR/bin/cx-pgsql app deploy $(printf '%q' "$app")"
+}
+
 CMD=${1:-status}
 [[ $# -gt 0 ]] && shift
 case $CMD in
@@ -324,6 +426,9 @@ case $CMD in
   objects-vercel) cmd_objects_vercel "$@" ;;
   brevo-auth) cmd_brevo_auth ;;
   report-preview) cmd_report_preview "$@" ;;
+  app-key) cmd_app_key "$@" ;;
+  app-secrets) cmd_app_secrets "$@" ;;
+  app-deploy) cmd_app_deploy "$@" ;;
   -h | --help | help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) die "Unknown command $CMD (see bin/remote.sh --help)" ;;
 esac

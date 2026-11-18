@@ -19,6 +19,9 @@ what's missing or broken, so the same command installs, repairs and confirms.
   uploads) so they stay out of Postgres. Private buckets and one key per app from `config/objects/`,
   HTTPS through nginx, an hourly encrypted copy in the same Dropbox folder, restore-tested weekly.
   Why and how: [docs/ObjectStorage.md](docs/ObjectStorage.md).
+- Optional **app containers** (`config/apps/`): small services built from their own repositories and
+  served on names of their own, such as cx-support's voice relay. Locked down, kept off the database
+  network, deployed only when asked. How: [docs/Apps.md](docs/Apps.md).
 - Optional **n8n** (alerts from `/status`, or anything else) and the Node/PM2 app stack from the
   old Contabo runbook.
 
@@ -64,6 +67,7 @@ port. `remote.sh` does that for you; if it can't get in, nothing is left locked.
 | `databases` | each `config/databases/*.env`: login, database, extensions, read-only login |
 | `backups` | timers for dumps, base backups, upload and verify; `cx-pgsql` on the PATH |
 | `node` | optional: nvm, Node, shared PM2 daemon (`ENABLE_NODE_STACK`) |
+| `apps` | optional: each `config/apps/*.env`: checkout, image, locked-down container on loopback (nginx and TLS for its name come from those steps); last, so an app waiting for its secrets holds nothing up |
 
 `setup.sh status|apply|repair|teardown|confirm [step…]` on the server; `bin/remote.sh` with the same
 words from your machine. Teardown runs in reverse order and keeps data unless given `--purge`.
@@ -78,6 +82,7 @@ words from your machine. Teardown runs in reverse order and keeps data unless gi
 | `PG_DIRECT_PORT` (28432) → 5432 | Postgres direct | loopback (SSH tunnel) unless `PG_DIRECT_BIND` says otherwise |
 | `HEALTH_PORT` (28480), `N8N_PORT` (28567) | health service, n8n | loopback, behind nginx |
 | `OBJECTS_S3_PORT` (28490), `OBJECTS_ADMIN_PORT` (28491) | Garage's S3 API (behind nginx on `OBJECTS_FQDN`), its admin API | loopback |
+| `APP_PORT` (28510 and up) | each app container (behind nginx on its `APP_FQDN`) | loopback |
 
 22, 5432 and 6432 are not open.
 
@@ -91,7 +96,8 @@ bin/cx-pgsql         operations on the server: databases, URLs, backups, restore
 bin/remote.sh       from your machine: sync + apply + confirm, tunnel, Dropbox authorisation
 stack/              compose.yml, Dockerfiles, postgresql.conf template, health service, n8n workflow,
                     objects/compose.yml (Garage)
-config/             server.env, authorized_keys, databases/*.env, objects/*.env (samples committed; yours ignored)
+config/             server.env, authorized_keys, databases/*.env, objects/*.env, apps/*.env (samples committed;
+                    yours ignored)
 docs/               Operations, Restore, VPS comparison
 tests/              a disposable "VPS" (systemd + Docker in a container) to run all of this locally
 ```
@@ -99,4 +105,5 @@ tests/              a disposable "VPS" (systemd + Docker in a container) to run 
 More: [docs/Operations.md](docs/Operations.md) (day-to-day, adding a database or an app's buckets, moving
 AltEd off Neon, alerts) · [docs/Restore.md](docs/Restore.md) (every kind of restore, disaster recovery) ·
 [docs/ObjectStorage.md](docs/ObjectStorage.md) (the object store: options, design, decisions) ·
+[docs/Apps.md](docs/Apps.md) (app containers: the voice relay, deploys, secrets) ·
 [stack/health/README.md](stack/health/README.md) (every check and threshold).

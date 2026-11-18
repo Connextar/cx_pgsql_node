@@ -47,7 +47,19 @@
 #   cx-pgsql maintenance cancel                call off a planned window (a booked reboot: shutdown -c)
 #   cx-pgsql maintenance feed                  what the apps read (GET /maintenance.json)
 #
-#   cx-pgsql secret show <name>                print one secret (e.g. pgbackrest-cipher-pass)
+#   cx-pgsql app list                          the app containers (config/apps/): name, address, commit, state
+#   cx-pgsql app deploy <app>                  fetch the newest commit of its APP_REF, build it, restart it
+#                                             (live connections drop: a voice relay's calls are cut off)
+#   cx-pgsql app rollback <app>                back to the image that ran before the last deploy
+#   cx-pgsql app key <app>                     its read-only deploy key (public half), made if missing
+#   cx-pgsql app secrets <app>                 its secrets by name: set or missing (never the values)
+#   cx-pgsql app secret <app> <NAME>           set one (the value on stdin; then: setup.sh apply apps)
+#   cx-pgsql app logs <app> [-f]               its container's log
+#   cx-pgsql app restart <app>
+#   cx-pgsql app remove <app> --yes            stop it, delete its images and checkout (secrets kept);
+#                                             for an app taken out of config/apps/
+#
+#   cx-pgsql secret show <name>               print one secret (e.g. pgbackrest-cipher-pass)
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -56,7 +68,7 @@ export PROJECT_DIR
 LOG_FILE=/var/log/cx-pgsql.log
 # shellcheck source=../lib/core.sh
 source "$PROJECT_DIR/lib/core.sh"
-for _lib in tls dbconf pg backup restore objects report maintenance; do
+for _lib in tls dbconf pg backup restore objects report maintenance apps; do
   # shellcheck source=/dev/null
   source "$PROJECT_DIR/lib/$_lib.sh"
 done
@@ -378,6 +390,88 @@ cmd_maintenance() {
   esac
 }
 
+# ─── app containers (lib/apps.sh, steps/95-apps.sh) ───────────────────────────────
+_app_list_row() {
+  local commit=- state=stopped
+  app_checked_out && commit=$(app_short)
+  app_running && state=running
+  [[ -n "$(app_missing_secrets)" ]] && state="$state, secrets missing"
+  printf '%-22s %-36s %-14s %-12s %s\n' "$APP_NAME" "https://$APP_FQDN" "$APP_REF" "${commit:0:7}" "$state"
+}
+_app_deploy() {
+  app_fetch || die "$APP_NAME: couldn't fetch $APP_REF (above)."
+  [[ -z "$(app_missing_secrets)" ]] || die "$APP_NAME: secret(s) not set: $(app_missing_secrets | tr '\n' ' ')— bin/remote.sh app-secrets $APP_NAME"
+  app_image_built || app_build || die "$APP_NAME: build failed."
+  app_write_files
+  if app_running && app_up_to_date; then
+    ok "$APP_NAME is already running $(app_short)."
+    return 0
+  fi
+  app_start || die "$APP_NAME: didn't start (above). The previous image, if any: cx-pgsql app rollback $APP_NAME"
+  ok "$APP_NAME is running $(app_short) on https://$APP_FQDN"
+}
+_app_rollback() {
+  local prev sha
+  prev=$(cat "$APP_DIR/.previous-image" 2>/dev/null || true)
+  [[ -n "$prev" ]] && docker image inspect "$prev" >/dev/null 2>&1 || die "$APP_NAME has no previous image to go back to."
+  # Point the checkout at the previous commit (shallow: fetch just that one), so the files match.
+  sha=$(docker image inspect -f '{{index .Config.Labels "cx.commit"}}' "$prev" 2>/dev/null || true)
+  [[ -n "$sha" ]] || die "$prev doesn't say which commit it was built from."
+  app_repo_is_ssh && app_key_ensure
+  app_git -C "$(app_src)" fetch --quiet --depth 1 origin "$sha" && git -C "$(app_src)" checkout --quiet --detach "$sha" ||
+    die "$APP_NAME: couldn't check out $sha."
+  app_image_built || die "$(app_image) is gone."
+  app_write_files
+  app_start || die "$APP_NAME: the previous image didn't start either (above)."
+  ok "$APP_NAME is back on $(app_short). The next deploy fetches $APP_REF's newest commit again."
+}
+_app_secrets_list() {
+  local v
+  for v in $APP_SECRETS; do
+    if secret_exists "$(app_secret_name "$APP_NAME" "$v")"; then printf '  %-28s set\n' "$v"; else printf '  %-28s MISSING\n' "$v"; fi
+  done
+}
+_app_remove() {
+  APP_NAME=$1 APP_DIR="$APPS_DIR/$1" APP_PROJECT="cx-app-$1" APP_IMAGE_REPO="cx-app/$1"
+  [[ "$APP_NAME" =~ ^[a-z0-9][a-z0-9-]{1,30}$ ]] || die "Not an app name: $APP_NAME"
+  [[ " $(app_names | tr '\n' ' ') " == *" $APP_NAME "* ]] && die "$APP_NAME is still in config/apps/: take its file out first (and apply, which removes its nginx site)."
+  docker rm -f "cx-app-$APP_NAME" >/dev/null 2>&1 || true
+  docker network rm "cx-app-$APP_NAME" >/dev/null 2>&1 || true
+  docker image ls "$APP_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' | xargs -r docker image rm >/dev/null 2>&1 || true
+  rm -rf "${APP_DIR:?}"
+  ok "Removed $APP_NAME (container, images, checkout). Its secrets stay: ls $SECRETS_DIR | grep '^app-$APP_NAME-'"
+}
+
+cmd_app() {
+  local sub=${1:-list} name=${2:-}
+  shift 2 || shift $# || true
+  case $sub in
+    list)
+      printf '%-22s %-36s %-14s %-12s %s\n' APP ADDRESS REF COMMIT STATE
+      app_each _app_list_row
+      local o
+      for o in $(apps_orphans); do printf '%-22s %s\n' "$o" "(not in config/apps/: cx-pgsql app remove $o --yes)"; done
+      ;;
+    deploy) app_one "${name:?app}" _app_deploy ;;
+    rollback) app_one "${name:?app}" _app_rollback ;;
+    key) app_one "${name:?app}" _app_key_print ;;
+    secrets) app_one "${name:?app}" _app_secrets_list ;;
+    secret) app_one "${name:?app}" app_secret_set "${1:?the secret NAME}" ;;
+    logs) app_one "${name:?app}" app_compose logs --tail 200 "$@" ;;
+    restart) app_one "${name:?app}" app_compose restart ;;
+    remove)
+      [[ "${1:-}" == --yes ]] || die "cx-pgsql app remove ${name:-<app>} --yes"
+      _app_remove "${name:?app}"
+      ;;
+    *) die "app list|deploy|rollback|key|secrets|secret|logs|restart|remove (see cx-pgsql --help)" ;;
+  esac
+}
+_app_key_print() {
+  app_repo_is_ssh || { info "$APP_NAME's repository ($APP_REPO) isn't reached over SSH: no deploy key needed."; return 0; }
+  app_key_ensure
+  app_key_public
+}
+
 case $1 in
   info) cmd_info ;;
   ps) _compose ps ;;
@@ -391,6 +485,7 @@ case $1 in
   objects) shift; cmd_objects "$@" ;;
   report) shift; cmd_report "$@" ;;
   maintenance) shift; cmd_maintenance "$@" ;;
+  app) shift; cmd_app "$@" ;;
   secret)
     [[ "${2:-}" == show && -n "${3:-}" ]] || die "cx-pgsql secret show <name>  (names: $(ls "$SECRETS_DIR" | tr '\n' ' '))"
     cat "$(secret_path "$3")"
