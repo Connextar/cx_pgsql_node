@@ -57,12 +57,35 @@ server emails `REPORT_TO` (`server-logs@connextar.com`) a summary of the last da
   the largest tables.
 - **Backups**: each job's last success, its runs in the period (ok / failed), sizes, the restore test,
   Dropbox space. **Object storage**: size, objects, capacity, each bucket and its change.
+- **App: <name>**, one section for every app in `config/apps/` (today cx-support's voice relay;
+  [Apps.md](Apps.md#in-the-nightly-report) has the details):
+  - **Container:** state and health check, uptime, restarts in the period, version (its `/healthz` text, or
+    the commit).
+  - **Endpoint:** `https://<APP_FQDN><APP_HEALTH_PATH>` fetched on the server through nginx (code and time),
+    the certificate nginx serves for the name (days left, issuer) and each `APP_STATIC` file by GET and POST.
+  - **Resources:** CPU on average over the period, memory now and at peak against its limit, out-of-memory
+    kills, the size of its Docker log files and of its images.
+  - **Traffic through nginx:** requests by status class, WebSocket sessions with their average and longest
+    length, upgrades refused (unsigned, or a bad signature), connections the app didn't answer (502–504),
+    rate-limited requests.
+  - **Its log:** error and warning lines, every event it logged with its count (the relay's `call_started`,
+    `upgrade_signature_invalid`, `model_error` …), and the most frequent errors and warnings, masked.
+
+  Its problems join **Needs attention** with the app's name in front:
+  - **Problems:** no container, or not running; the health endpoint not answering 2xx; a certificate expired or
+    under 7 days; a static file (the relay's `fallback.xml`) not served.
+  - **Warnings:** unhealthy; restarted by Docker; an out-of-memory kill or memory peaking over 90 % of the limit;
+    a certificate under 21 days, or still self-signed; a WebSocket connection nginx couldn't pass on; the health
+    path answering 5xx through nginx during the period; the endpoint taking over 2 s; an **error spike** (5 or
+    more errors, and at least 3× the period before).
+  - **Notes:** a redeploy, other errors in its log, refused upgrades, a session cut off at the one-hour limit.
 - **All checks**: the health service's verdicts.
 
 Figures are the change since the last email that was sent (the counters are kept in
 `/var/lib/cx-pgsql/report/snapshot.json`, only after a send succeeds), so a missed night rolls into
 the next. Nothing that leaves the server carries row data: statement text is PostgreSQL's normalised
-form with literals masked, and log messages keep only schema names.
+form with literals masked, and log messages keep only schema names. An app's log gives counts, event names
+and masked messages only: no call id, phone number, address or anything a caller said.
 
 - **Set up**: `bin/remote.sh brevo-auth` (asks for the API key, has Brevo check it, keeps it as a
   root-only secret). `REPORT_FROM` must be a sender verified in Brevo; if Brevo restricts API keys to

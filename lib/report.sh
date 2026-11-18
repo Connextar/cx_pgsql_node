@@ -229,6 +229,179 @@ rpt_sql_json() {
   jq -nc --slurpfile s <(printf '%s' "$stmts") --slurpfile t <(printf '%s' "$tables") '{statements: $s[0], tables: $t[0]}'
 }
 
+# ─── The apps (config/apps/, lib/apps.sh) ───────────────────────────────────────────
+# Per app: its container, resources, disk, the public endpoint and certificate, its static files, nginx's
+# record of the period and its own log lines. Read-only, and every command is time-boxed: a hung Docker,
+# nginx or app costs that part of the section, never the email. The log lines leave here raw (the last
+# RPT_APP_LOG_LINES of each stream, cut to 400 characters) into the input file in REPORT_STATE_DIR (0700),
+# deleted once rendered; digest.mjs (src/app-report.mjs) keeps only counts, event names and masked messages.
+RPT_APP_LOG_LINES=20000
+
+_rpt_read() { cat "$1" 2>/dev/null || true; }
+_rpt_iso() { date -u -d "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true; }
+
+# nginx's access log of one app (the cx_app format, steps/60-nginx.sh: combined, then the request time and the
+# Upgrade header), summed over the period: requests by status, WebSocket upgrades by status, sessions (a 101's
+# line is written when the socket closes, its request time the session's length) and the health path's
+# answers. Lines in plain combined format (written before cx_app) count, without a length. Log times are the
+# server's, which is UTC.
+_rpt_app_nginx() { # since health_path timeout_s file...
+  local since=$1 hpath=$2 tmo=$3 files=() f
+  shift 3
+  for f in "$@"; do [[ -s "$f" ]] && files+=("$f"); done
+  ((${#files[@]})) || { echo null; return 0; }
+  cat "${files[@]}" 2>/dev/null | awk -v s="$since" -v hp="$hpath" -v tmo="$tmo" '
+    BEGIN { split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mn, " "); for (i = 1; i <= 12; i++) mon[mn[i]] = sprintf("%02d", i) }
+    function add(arr, k) { arr[k]++ }
+    function obj(arr,   k, out, sep) { out = "{"; sep = ""; for (k in arr) { out = out sep "\"" k "\":" arr[k]; sep = "," } return out "}" }
+    {
+      if (!match($0, /\[[0-9][0-9]\/[A-Z][a-z][a-z]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]:[0-9][0-9] /)) next
+      t = substr($0, RSTART + 1, 20)
+      if (substr(t, 8, 4) "-" mon[substr(t, 4, 3)] "-" substr(t, 1, 2) " " substr(t, 13, 8) < s) next
+      rest = substr($0, RSTART)
+      if (!match(rest, /\] "[^"]*" [0-9][0-9][0-9] /)) next
+      req = substr(rest, RSTART + 3, RLENGTH - 9); code = substr(rest, RSTART + RLENGTH - 4, 3) + 0
+      split(req, rq, " "); path = rq[2]; sub(/\?.*/, "", path)
+      rt = ""; up = ""
+      if (match($0, / [0-9]+\.[0-9]+ "[^"]*"$/)) { tail = substr($0, RSTART + 1); rt = tail; sub(/ .*/, "", rt); up = tail; sub(/^[^"]*"/, "", up); sub(/"$/, "", up) }
+      n++; add(st, code)
+      if (path == hp) { hn++; if (code >= 500) h5++ }
+      if ((up != "" && up != "-") || code == 101) {
+        un++; add(ust, code)
+        if (code == 101) { sc++; if (rt != "") { tn++; tt += rt; if (rt + 0 > mx) mx = rt + 0; if (tmo > 0 && rt + 0 >= tmo - 10) at++ } }
+      }
+    }
+    END {
+      printf "{\"requests\":%d,\"status\":%s,\"upgrades\":{\"total\":%d,\"status\":%s},", n, obj(st), un, obj(ust)
+      printf "\"sessions\":{\"count\":%d,\"timed\":%d,\"total_s\":%.3f,\"max_s\":%.3f,\"at_timeout\":%d},", sc, tn, tt, mx, at
+      printf "\"health_requests\":%d,\"health_5xx\":%d}\n", hn, h5
+    }' || echo null
+}
+
+# One app's facts (run by app_each: APP_* set). Prints one JSON object.
+_rpt_app_one() { # since
+  local since=$1 tmp container=null cid='' cg='' resources=null disk=null endpoint=null tls=null static=null nginx logok=true
+  local insecure=() out end issuer logpath logs_bytes=null images img size isize=0 icount=0 f g p
+  tmp=$(mktemp -d "$REPORT_STATE_DIR/app.XXXXXX")
+
+  # The container, as Docker sees it.
+  if timeout 15 docker inspect "$APP_CONTAINER" >"$tmp/inspect" 2>/dev/null; then
+    container=$(jq -c '.[0] | {id: .Id, state: .State.Status, health: (.State.Health.Status // null),
+        failing_streak: (.State.Health.FailingStreak // null), health_output: (((.State.Health.Log // [])[-1].Output // "") | .[:300]),
+        started_at: .State.StartedAt, restarts: .RestartCount, oom_killed: .State.OOMKilled, exit_code: .State.ExitCode,
+        image: .Config.Image, nano_cpus: .HostConfig.NanoCpus, memory_limit: .HostConfig.Memory, log_path: .LogPath,
+        commit: ((.Config.Labels // {})["cx.commit"] // ((.Config.Env // []) | map(select(startswith("GIT_COMMIT="))) | .[0] // "" | ltrimstr("GIT_COMMIT=")) | if . == "" then null else . end)}' \
+      "$tmp/inspect" 2>/dev/null) || container=null
+    cid=$(jq -r '.id // empty' <<<"$container" 2>/dev/null || true)
+  fi
+
+  # Its cgroup (v2): memory now and at peak since it started, CPU time since it started, OOM kills.
+  if [[ "$cid" =~ ^[0-9a-f]{12,}$ ]]; then
+    cg=/sys/fs/cgroup/system.slice/docker-$cid.scope
+    [[ -d "$cg" ]] || cg=$(find /sys/fs/cgroup -maxdepth 4 -type d -name "*$cid*" 2>/dev/null | head -1 || true)
+  fi
+  if [[ -n "$cg" && -d "$cg" ]]; then
+    resources=$(jq -nc --arg cur "$(_rpt_read "$cg/memory.current")" --arg peak "$(_rpt_read "$cg/memory.peak")" \
+      --arg max "$(_rpt_read "$cg/memory.max")" --arg pids "$(_rpt_read "$cg/pids.current")" \
+      --arg cpu "$(awk '$1 == "usage_usec" { print $2 }' "$cg/cpu.stat" 2>/dev/null || true)" \
+      --arg oom "$(awk '$1 == "oom_kill" { print $2 }' "$cg/memory.events" 2>/dev/null || true)" \
+      'def n: if test("^[0-9]+$") then tonumber else null end;
+       {memory_bytes: ($cur | n), memory_peak_bytes: ($peak | n), memory_limit_bytes: ($max | n), cpu_usec: ($cpu | n), oom_kills: ($oom | n), pids: ($pids | n)}')
+  fi
+
+  # Disk: Docker's json log files for it, and the images kept (the running one and the one before).
+  logpath=$(jq -r '.log_path // empty' <<<"$container" 2>/dev/null || true)
+  if [[ -n "$logpath" ]]; then
+    logs_bytes=$(du -cb "$logpath"* 2>/dev/null | tail -1 | cut -f1 || true)
+    [[ "$logs_bytes" =~ ^[0-9]+$ ]] || logs_bytes=null
+  fi
+  images=$(timeout 15 docker image ls -q "$APP_IMAGE_REPO" 2>/dev/null | sort -u || true)
+  for img in $images; do
+    size=$(timeout 15 docker image inspect -f '{{.Size}}' "$img" 2>/dev/null || true)
+    [[ "$size" =~ ^[0-9]+$ ]] && isize=$((isize + size)) icount=$((icount + 1))
+  done
+  disk=$(jq -nc --argjson logs "$logs_bytes" --argjson img "$isize" --argjson n "$icount" '{logs_bytes: $logs, images_bytes: $img, images: $n}')
+
+  # The public endpoint, the way a client reaches it (TLS at nginx), resolved to this machine.
+  tls_is_self_signed "$APP_FQDN" && insecure=(-k)
+  out=$(curl -sS -o "$tmp/body" -w '%{http_code} %{time_total}' --max-time 10 ${insecure[@]+"${insecure[@]}"} \
+    --resolve "$APP_FQDN:443:127.0.0.1" "https://$APP_FQDN$APP_HEALTH_PATH" 2>"$tmp/curl.err" || true)
+  endpoint=$(jq -nc --arg url "https://$APP_FQDN$APP_HEALTH_PATH" --arg out "$out" \
+    --arg body "$(head -c 200 "$tmp/body" 2>/dev/null | head -1 | tr -cd '[:print:]' || true)" \
+    --arg err "$(head -1 "$tmp/curl.err" 2>/dev/null | cut -c1-200 || true)" \
+    '($out | split(" ")) as $o
+     | {url: $url, code: (($o[0] // "0") | tonumber? // 0), seconds: (($o[1] // "") | tonumber? // null),
+        body: (if $body == "" then null else $body end), error: (if $err == "" then null else ($err | sub("^curl: "; "")) end)}')
+
+  # The certificate nginx serves for the name.
+  end=$( (timeout 10 openssl s_client -connect 127.0.0.1:443 -servername "$APP_FQDN" </dev/null 2>/dev/null || true) |
+    openssl x509 -noout -enddate -issuer -nameopt multiline 2>/dev/null || true)
+  issuer=$(sed -n 's/^ *organizationName *= *//p' <<<"$end" | head -1)
+  end=$(sed -n 's/^notAfter=//p' <<<"$end")
+  tls=$(jq -nc --arg end "$( [[ -n "$end" ]] && _rpt_iso "$end")" --arg issuer "$issuer" \
+    --argjson self "$(tls_is_self_signed "$APP_FQDN" && echo true || echo false)" \
+    '{not_after: (if $end == "" then null else $end end), issuer: (if $issuer == "" then null else $issuer end), self_signed: $self}')
+
+  # APP_STATIC's files, as nginx serves them (GET and POST: Twilio may fetch either way). Five at most.
+  if app_has_static; then
+    if [[ -d "$(app_static_dir)" ]]; then
+      static=$( (cd "$(app_static_dir)" && find . -type f -printf '/%P\n' 2>/dev/null | LC_ALL=C sort | head -5) | while IFS= read -r f; do
+        g=$(curl -sS -o /dev/null -w '%{http_code} %{content_type}' --max-time 10 ${insecure[@]+"${insecure[@]}"} \
+          --resolve "$APP_FQDN:443:127.0.0.1" "https://$APP_FQDN$f" 2>/dev/null || true)
+        p=$(curl -sS -o /dev/null -X POST -w '%{http_code}' --max-time 10 ${insecure[@]+"${insecure[@]}"} \
+          --resolve "$APP_FQDN:443:127.0.0.1" "https://$APP_FQDN$f" 2>/dev/null || true)
+        jq -nc --arg path "$f" --arg g "$g" --arg p "$p" \
+          '{path: $path, get: (($g | split(" ")[0]) | tonumber? // 0), post: ($p | tonumber? // 0),
+            type: ($g | split(" ")[1:] | join(" ") | if . == "" then null else . end)}'
+      done | jq -sc '{published: true, files: .}')
+    else
+      static='{"published": false, "files": []}'
+    fi
+  fi
+
+  nginx=$(_rpt_app_nginx "$since" "$APP_HEALTH_PATH" "$(app_websocket && echo 3600 || echo 0)" \
+    "/var/log/nginx/cx-app-$APP_NAME.access.log.1" "/var/log/nginx/cx-app-$APP_NAME.access.log")
+  jq -e . >/dev/null 2>&1 <<<"$nginx" || nginx=null
+
+  # Its own output in the period, each stream apart (stderr is where a crash goes).
+  if [[ -n "$cid" ]]; then
+    timeout 30 docker logs --since "$(_rpt_iso "$since")" "$APP_CONTAINER" >"$tmp/out" 2>"$tmp/err" || logok=false
+    jq -nc --argjson ok "$logok" \
+      --argjson no "$(wc -l <"$tmp/out")" --rawfile o <(tail -n "$RPT_APP_LOG_LINES" "$tmp/out" | cut -c1-400) \
+      --argjson ne "$(wc -l <"$tmp/err")" --rawfile e <(tail -n "$RPT_APP_LOG_LINES" "$tmp/err" | cut -c1-400) \
+      '{ok: $ok, stdout: {lines: $no, text: ($o | split("\n") | map(select(length > 0)))},
+        stderr: {lines: $ne, text: ($e | split("\n") | map(select(length > 0)))}}' >"$tmp/log.json" 2>/dev/null || echo null >"$tmp/log.json"
+  else
+    echo null >"$tmp/log.json"
+  fi
+
+  jq -nc --arg name "$APP_NAME" --arg fqdn "$APP_FQDN" --arg hp "$APP_HEALTH_PATH" \
+    --argjson ws "$(app_websocket && echo true || echo false)" \
+    --argjson container "${container:-null}" --argjson resources "${resources:-null}" --argjson disk "${disk:-null}" \
+    --argjson endpoint "${endpoint:-null}" --argjson tls "${tls:-null}" --argjson static "${static:-null}" \
+    --argjson nginx "${nginx:-null}" --slurpfile log "$tmp/log.json" \
+    '{name: $name, fqdn: $fqdn, websocket: $ws, health_path: $hp, container: ($container | if . then del(.log_path) else . end),
+      resources: $resources, disk: $disk, endpoint: $endpoint, tls: $tls, static: $static, nginx: $nginx, log: $log[0]}'
+  rm -rf "$tmp"
+}
+
+# One app, or a line saying it couldn't be looked at: never nothing, so the email still names it.
+_rpt_app_safe() { # since
+  local one
+  if one=$(_rpt_app_one "$1" 2>/dev/null) && jq -e '.name' >/dev/null 2>&1 <<<"$one"; then
+    printf '%s\n' "$one"
+  else
+    jq -nc --arg n "$APP_NAME" --arg f "$APP_FQDN" '{name: $n, fqdn: $f, error: "its facts could not be gathered (cx-pgsql report preview on the server shows why)"}'
+  fi
+}
+
+# Every app in config/apps/, as a JSON array ([] when there's none).
+_rpt_apps() { # since
+  declare -F app_each >/dev/null && apps_any || { echo '[]'; return 0; }
+  { app_each _rpt_app_safe "$1" || true; } | jq -sc .
+  rm -rf "$REPORT_STATE_DIR"/app.* # what a check killed half-way left
+}
+
 # Everything digest.mjs needs, as one document.
 rpt_gather() { # → stdout
   local since
@@ -240,10 +413,11 @@ rpt_gather() { # → stdout
     --slurpfile status <(rpt_status_json) \
     --slurpfile host <(rpt_host_json "$since") \
     --slurpfile sql <(rpt_sql_json) \
+    --slurpfile apps <(_rpt_apps "$since") \
     --slurpfile prev <(cat "$REPORT_STATE_DIR/snapshot.json" 2>/dev/null || echo null) \
     '{generated_at: $at, server: {hostname: $hostname, fqdn: $fqdn},
       config: {to: $to, timezone: $tz, slow_mean_ms: $slow, ignore_users: ($ignore | split(" ") | map(select(length > 0)))},
-      status: $status[0], host: $host[0], sql: $sql[0], previous: $prev[0]}'
+      status: $status[0], host: $host[0], sql: $sql[0], apps: $apps[0], previous: $prev[0]}'
 }
 
 rpt_render() { # input file → stdout

@@ -91,10 +91,43 @@ bin/remote.sh cx app rollback cx-support-relay # the image that ran before the l
 | `bin/remote.sh app-deploy <app>`                       | newest commit of `APP_REF`, built and started                   |
 | `bin/remote.sh cx app rollback <app>`                  | the previous image                                              |
 | `bin/remote.sh cx app logs <app> [-f]`                 | its log (the relay logs events, never what callers say)         |
+| `bin/remote.sh report-preview`                         | tonight's email, with each app's section, built without sending |
 | `bin/remote.sh cx app restart <app>`                   | restart without rebuilding                                      |
 | `bin/remote.sh app-secrets <app> [NAME…]`              | change a secret (e.g. after rotating the Anthropic key)         |
 | `bin/remote.sh cx app secrets <app>`                   | which secrets are set (never the values)                        |
 | take its file out of `config/apps/`, `apply`, then `bin/remote.sh cx app remove <app> --yes` | retire an app (secrets kept) |
+
+## In the nightly report
+
+The morning email ([Operations.md](Operations.md#the-nightly-report-email)) has a section for every app, built the
+same way for each (`lib/report.sh` `_rpt_apps` gathers, `stack/health/src/app-report.mjs` reads). Gathering takes
+about a second an app; every command is time-boxed (Docker 15–30 s, each HTTPS request 10 s), so a hung app, Docker
+or nginx costs that part of the section, never the email. All of it is read-only.
+
+| Part | Where it comes from |
+| --- | --- |
+| Container: state, health, failing streak, uptime, restarts, image and commit | `docker inspect cx-app-<app>`; restarts in the period are Docker's count against the last report's for the same container (a redeploy starts a new count) |
+| CPU, memory now and at peak, out-of-memory kills | the container's cgroup (`/sys/fs/cgroup/system.slice/docker-<id>.scope`): CPU time since it started, against the last report's |
+| Log files, images | Docker's json log files for it; the images kept in `cx-app/<app>` |
+| Health endpoint, certificate | `https://APP_FQDN/APP_HEALTH_PATH` resolved to this machine (as `status` checks it); `openssl s_client` for the certificate nginx serves |
+| Static files | each `APP_STATIC` file (five at most) fetched through nginx by GET and by POST |
+| Traffic, WebSocket sessions | nginx's access log for the app, today's and yesterday's (`/var/log/nginx/cx-app-<app>.access.log[.1]`) |
+| Errors, warnings, events | `docker logs --since <last report>`: the last 20,000 lines of each stream |
+
+- **Sessions and their length** come from nginx: it writes a WebSocket's line when the socket closes, and the app
+  sites log in the `cx_app` format (combined, then `$request_time` and the `Upgrade` header). Lines written before
+  that format count as sessions without a length, and a refused upgrade among them can't be told from a plain 403.
+- **Events** are lines in the form `[tag] event_name { detail }`, which is how cx-house's relay logs. Each is counted
+  by name, and its severity read from the name: `…_error` and `…_failed` are errors; `…_invalid`, `rejected…`,
+  `refused…`, `…_limit` and `…_incomplete` are warnings. From the detail only numbers (summed: average, longest,
+  total) and short enum-like values are kept, never a field named like an id, a number, a name or a message. Any
+  other line is an error if it says so or came on stderr, and it's shown masked: quoted text, numbers, ids, phone
+  numbers and addresses replaced.
+- **Health check failures over the day aren't available**: Docker keeps only the last five results and a small,
+  shared buffer of events. The report shows the current state and failing streak, and the health path's 5xx answers
+  through nginx in the period, which an external monitor polling it (UptimeRobot, today) makes a fair record.
+- **A redeploy** replaces the container, so its log restarts with it: the period before the deploy isn't in the
+  counts.
 
 ## Adding another app
 

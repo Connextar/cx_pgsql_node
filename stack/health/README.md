@@ -294,6 +294,9 @@ snapshot and the issues; `src/digest-html.mjs` renders an email-client-safe HTML
 styles, one 600 px column, dark-mode and narrow-screen rules that degrade quietly); `digestText` the plain
 part. Statement text goes through `maskSql`; Postgres log messages through `maskLogMessage`, which keeps
 the identifier after words like `constraint` or `relation` and hides every other quoted value and number.
+The app containers' facts (`apps[]`) go through `src/app-report.mjs`: a section and issues per app, and
+their log lines reduced to counts, event names and messages masked by `maskAppMessage` (docs/Apps.md, "In
+the nightly report").
 
 ## Running it
 

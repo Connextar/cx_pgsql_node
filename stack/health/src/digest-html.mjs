@@ -2,7 +2,8 @@
 // Word, Gmail drops most of <style>, phones are 320–430px wide. So: tables for layout, inline styles on
 // everything, one 600px column that shrinks, system fonts, no images, colour never the only signal (every
 // status also has a word), and a <style> block only for what can degrade — dark mode and narrow screens.
-import { formatBytes, formatCount, formatDeltaBytes, formatMs, USAGE_LABELS, withDelta } from './digest.mjs';
+import { formatBytes, formatCount, formatDeltaBytes, formatMs, formatSeconds, USAGE_LABELS, withDelta } from './digest.mjs';
+import { eventDetail } from './app-report.mjs';
 
 export const C = {
   page: '#eef0f3',
@@ -234,6 +235,9 @@ ${rows(o.buckets.map((b) => [b.name, `${esc(formatBytes(b.bytes))} ${small(`${fo
       )
     : '';
 
+  // -- the apps, one section each
+  const apps = m.apps.map(appSection).join('\n');
+
   // -- every check
   const checks = section(
     'All checks',
@@ -250,6 +254,7 @@ ${rows(o.buckets.map((b) => [b.name, `${esc(formatBytes(b.bytes))} ${small(`${fo
     { label: `Databases (${p.database_count})`, value: formatBytes(p.total_size), sub: esc(`${formatCount(stmt.totals.calls)} app queries`) },
     o && { label: 'Object storage', value: formatBytes(o.bytes), sub: esc(`${formatCount(o.objects)} objects · ${o.used_pct}% of capacity`), pct: o.used_pct },
     { label: 'Backups', value: `${backupsOk} of ${m.backups.rows.length} OK`, sub: m.backups.dropbox ? esc(`${formatBytes(m.backups.dropbox.free)} free in Dropbox`) : '&nbsp;', status: backupStatus },
+    m.apps.length && appsTile(m.apps),
   ].filter(Boolean);
 
   return emailPage({
@@ -265,9 +270,84 @@ ${server}
 ${postgres}
 ${backups}
 ${objects}
+${apps}
 ${checks}`,
-    footer: `Sent by ${esc(m.server.hostname)} (CX_PGSQL_Node_1) at ${esc(m.generated_local)}. Query text is normalised by PostgreSQL and every literal is masked; log messages have their values hidden. Live status: <span style="white-space:nowrap;">cx-pgsql health</span> on the server.`,
+    footer: `Sent by ${esc(m.server.hostname)} (CX_PGSQL_Node_1) at ${esc(m.generated_local)}. Query text is normalised by PostgreSQL and every literal is masked; log messages have their values hidden; the apps' logs give counts, event names and masked messages only. Live status: <span style="white-space:nowrap;">cx-pgsql health</span> on the server.`,
   });
+}
+
+const appWord = { ok: 'OK', warn: 'Warning', fail: 'Problem' };
+
+function appsTile(apps) {
+  const healthy = apps.filter((a) => a.status === 'ok').length;
+  const sessions = apps.filter((a) => a.websocket && a.traffic).reduce((s, a) => s + a.traffic.sessions.count, 0);
+  const errors = apps.reduce((s, a) => s + (a.log?.errors ?? 0), 0);
+  const sub = [apps.some((a) => a.websocket) && `${formatCount(sessions)} WebSocket session${sessions === 1 ? '' : 's'}`, `${formatCount(errors)} log error${errors === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+  return { label: `Apps (${apps.length})`, value: healthy === apps.length ? `${healthy === 1 ? '' : 'All '}${healthy} healthy` : `${apps.length - healthy} need${apps.length - healthy === 1 ? 's' : ''} attention`, sub: esc(sub) };
+}
+
+/** One app's section: its container, endpoint and certificate, its static files, resources, traffic and log. */
+export function appSection(a) {
+  if (a.error) return section(`App: ${a.name}`, rows([['Not gathered', `${pill('warn', 'Warning')} ${small(esc(a.error))}`]]), a.fqdn);
+  const c = a.container;
+  const r = a.resources;
+  const t = a.traffic;
+  const containerPill = !c ? pill('fail', 'No container') : c.state !== 'running' ? pill('fail', c.state) : c.health && c.health !== 'healthy' ? pill(c.health === 'starting' ? 'info' : 'warn', c.health) : pill('ok', c.health ?? 'running');
+  const head = rows([
+    ['Container', `${containerPill}${c?.uptime ? ` ${small(`up ${esc(c.uptime)}`)}` : ''}`],
+    ['Restarts', c ? `${c.restart_delta ? pill('warn', `${c.restart_delta} in the period`) : esc(c.restart_delta === null ? 'first report' : 'none in the period')} ${small(`${c.restarts ?? 0} since created${c.redeployed ? ' · redeployed' : ''}`)}` : null],
+    ['Version', a.version || c?.commit ? `${esc(a.version ?? c.commit)}${c?.started ? ` ${small(`since ${esc(c.started)}`)}` : ''}` : null],
+    ['Health endpoint', a.endpoint ? `${pill(a.endpoint.ok ? (a.endpoint.ms >= 2000 ? 'warn' : 'ok') : 'fail', a.endpoint.code ? String(a.endpoint.code) : 'No answer')} ${small(esc([a.endpoint.ms !== null && formatMs(a.endpoint.ms), a.endpoint.error].filter(Boolean).join(' · ')))}` : null],
+    ['TLS certificate', a.tls ? (a.tls.days_left === null ? pill('warn', 'Unreadable') : `${pill(a.tls.days_left < 7 ? 'fail' : a.tls.days_left < 21 || a.tls.self_signed ? 'warn' : 'ok', `${a.tls.days_left} days left`)} ${small(esc([a.tls.expires, a.tls.self_signed ? 'self-signed' : a.tls.issuer].filter(Boolean).join(' · ')))}`) : null],
+    ...(a.static?.files ?? []).map((f) => [f.path, `${pill(f.ok ? 'ok' : 'fail', f.ok ? 'Served' : 'Not served')} ${small(esc(`GET ${f.get || '—'}${f.post !== null ? ` · POST ${f.post || '—'}` : ''}${f.type ? ` · ${f.type}` : ''}`))}`]),
+    a.static && !a.static.published ? ['Static files', pill('fail', 'Not published')] : null,
+  ].filter(Boolean));
+
+  const resources = rows([
+    ['CPU', r.cpu_pct !== null ? `${esc(r.cpu_pct)}% ${small(`of a core on average ${r.cpu_basis === 'period' ? 'over the period' : 'since it started'}${r.cpu_limit ? ` · limit ${r.cpu_limit} CPU` : ''}`)}` : null],
+    ['Memory', r.memory !== null ? `${esc(formatBytes(r.memory))} ${small(`now · ${formatBytes(r.memory_peak) ?? '?'} at peak${r.memory_limit ? ` · limit ${formatBytes(r.memory_limit)}` : ''}`)}` : null],
+    ['Out-of-memory kills', r.oom_kills ? pill('warn', String(r.oom_kills)) : null],
+    ['Log files', a.disk?.logs !== null && a.disk?.logs !== undefined ? esc(formatBytes(a.disk.logs)) : null],
+    ['Images', a.disk?.images ? `${esc(formatBytes(a.disk.images))} ${small(`${a.disk.image_count} kept`)}` : null],
+  ]);
+
+  const traffic = t
+    ? rows([
+        ['Requests', `${esc(formatCount(t.requests))} ${small(esc(Object.entries(t.by_class).filter(([, v]) => v).map(([k, v]) => `${formatCount(v)} ${k}`).join(' · ')))}`],
+        a.websocket ? ['WebSocket sessions', `${esc(formatCount(t.sessions.count))}${t.sessions.avg_s !== null ? ` ${small(`${formatSeconds(t.sessions.avg_s)} average · longest ${formatSeconds(t.sessions.max_s)}`)}` : ''}`] : null,
+        a.websocket ? ['Upgrades refused', `${esc(formatCount(t.upgrades.refused))} ${small('unsigned or a bad signature')}`] : null,
+        a.websocket && t.upgrades.failed ? ['WebSocket failed at nginx', pill('warn', formatCount(t.upgrades.failed))] : null,
+        t.upstream_failed ? ['App unreachable (502–504)', esc(formatCount(t.upstream_failed))] : null,
+        t.health_5xx ? ['Health path errors', pill('warn', formatCount(t.health_5xx))] : null,
+        t.rate_limited ? ['Rate-limited (429)', esc(formatCount(t.rate_limited))] : null,
+      ].filter(Boolean))
+    : '';
+
+  const log = a.log;
+  const events = log.events
+    .slice(0, 12)
+    .map((ev) => {
+      const d = eventDetail(ev, formatCount);
+      return [ev.name, `${ev.severity === 'info' ? '' : `${pill(ev.severity === 'error' ? 'fail' : 'warn', ev.severity === 'error' ? 'error' : 'warning')} `}${esc(formatCount(ev.count))}${d ? `<br>${small(esc(d))}` : ''}`];
+    });
+  const topList = log.top
+    .map(
+      (x) => `<tr><td class="rowline" style="padding:8px 0;border-bottom:1px solid ${C.line};font-family:${FONT};font-size:13px;line-height:18px;color:${C.text};">
+${pill(x.severity === 'error' ? 'fail' : 'warn', x.severity === 'error' ? 'error' : 'warning')} <strong>${esc(formatCount(x.count))}×</strong>${x.event ? ` ${small('event')}` : ''}
+${code(x.message)}</td></tr>`,
+    )
+    .join('');
+
+  return section(
+    `App: ${a.name}`,
+    `${head}
+${subhead('Resources')}${resources}
+${traffic ? `${subhead('Traffic through nginx')}${traffic}` : ''}
+${subhead('Its log')}${rows([['Lines', `${esc(formatCount(log.lines))} ${small(`${formatCount(log.errors)} errors · ${formatCount(log.warnings)} warnings${log.errors_before !== null && log.errors_before !== undefined ? ` · ${formatCount(log.errors_before)} errors the period before` : ''}`)}`]])}
+${events.length ? rows(events) : ''}
+${topList ? `${subhead('Errors and warnings, values hidden')}<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 12px;">${topList}</table>` : ''}`,
+    `${a.fqdn ?? ''}${a.status !== 'ok' ? ` · ${appWord[a.status]}` : ''}`,
+  );
 }
 
 /**

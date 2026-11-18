@@ -6,11 +6,14 @@
 //   host     facts only the host can see: filesystems, space by area, updates, reboot, containers,
 //            the last day's backup job runs, SSH and fail2ban, Postgres and PgBouncer log errors, Dropbox space
 //   sql      what needs a superuser and every database: all of pg_stat_statements, the largest tables
+//   apps     the app containers (config/apps/): container, resources, endpoint, certificate, static files,
+//            nginx's record of the period and their own log lines (src/app-report.mjs reads them)
 //   previous the snapshot the last report left (or null)
 //
 // Output: { status, subject, preheader, issues[], model, snapshot }. The renderers (digest-html.mjs and
 // digestText below) turn `model` into the email. Nothing here reads the network or the disk.
 import { worstStatus, formatHours } from './report.mjs';
+import { buildApps, eventDetail } from './app-report.mjs';
 import { maskSql, round } from './util.mjs';
 
 export const SEVERITIES = Object.freeze(['fail', 'warn', 'info']);
@@ -61,6 +64,15 @@ export function formatDuration(seconds) {
   if (days > 0) return `${days} day${days === 1 ? '' : 's'}${hours ? ` ${hours} h` : ''}`;
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours} h ${minutes} min` : `${minutes} min`;
+}
+
+/** A call's or a session's length: "42 s", "3 min 12 s", "1 h 2 min". */
+export function formatSeconds(seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return null;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ''}`;
+  return formatDuration(s);
 }
 
 export function pct(part, whole) {
@@ -467,6 +479,9 @@ export function buildDigest(input, nowArg) {
     issue('info', 'TLS', `The certificate renews automatically; ${Math.floor(tls.days_left)} days left.`);
   }
 
+  // -- the apps (their issues join the rest; area: the app's name)
+  const appsBuilt = buildApps(input.apps, { now, prev, issue, timezone: cfg.timezone, fmt: { formatWhen, formatDuration, formatBytes, formatMs } });
+
   // -- security
   const ssh = isObj(host.ssh) ? host.ssh : null;
   const jails = Array.isArray(host.fail2ban) ? host.fail2ban : [];
@@ -553,6 +568,7 @@ export function buildDigest(input, nowArg) {
           healthy: checks.find((c) => c.name === 'objects')?.status ?? null,
         }
       : null,
+    apps: appsBuilt.apps,
     checks: checks.map((c) => ({ name: c.name, label: checkLabel(c.name), status: c.status, message: c.message })),
     issues,
     period_hours: periodHours,
@@ -577,6 +593,7 @@ export function buildDigest(input, nowArg) {
     usage: isObj(host.usage) ? host.usage : {},
     containers: Object.fromEntries(containers.map((c) => [c.name, n(c.restarts)])),
     security_updates: securityNow,
+    apps: appsBuilt.snapshot,
   };
 
   return { status: overall, subject, preheader, issues, model, snapshot };
@@ -673,6 +690,40 @@ export function digestText({ model, subject }) {
     line('OBJECT STORAGE');
     kv('Stored', `${formatBytes(m.objects.bytes)} in ${formatCount(m.objects.objects)} objects (${m.objects.used_pct}% of ${formatBytes(m.objects.capacity)})${m.objects.bytes_delta ? `, ${formatDeltaBytes(m.objects.bytes_delta)}` : ''}`);
     for (const b of m.objects.buckets) kv(`  ${b.name}`, `${formatBytes(b.bytes)}, ${formatCount(b.objects)} objects${b.objects_delta ? ` (${b.objects_delta > 0 ? '+' : ''}${b.objects_delta})` : ''}`);
+  }
+  for (const a of m.apps) {
+    line();
+    line(`APP ${a.name.toUpperCase()}${a.fqdn ? ` (${a.fqdn})` : ''}`);
+    if (a.error) {
+      kv('Not gathered', a.error);
+      continue;
+    }
+    const c = a.container;
+    kv('Container', c ? `${c.state}${c.health ? `, ${c.health}` : ''}${c.uptime ? `, up ${c.uptime}` : ''}` : 'none');
+    kv('Restarts', c ? `${c.restart_delta === null ? 'first report, nothing to compare' : `${c.restart_delta} in the period`} (${c.restarts ?? 0} since it was created)` : null);
+    kv('Version', a.version ?? c?.commit ?? null);
+    kv('Health endpoint', a.endpoint ? `${a.endpoint.code || 'no answer'}${a.endpoint.ms !== null ? ` in ${formatMs(a.endpoint.ms)}` : ''}` : null);
+    kv('TLS certificate', a.tls ? (a.tls.days_left !== null ? `${a.tls.days_left} days left (${a.tls.expires})${a.tls.self_signed ? ', self-signed' : ''}` : 'unreadable') : null);
+    for (const f of a.static?.files ?? []) kv(f.path, `${f.ok ? 'served' : 'NOT SERVED'} (GET ${f.get}${f.post !== null ? `, POST ${f.post}` : ''}${f.type ? `, ${f.type}` : ''})`);
+    const r = a.resources;
+    kv('CPU', r.cpu_pct !== null ? `${r.cpu_pct}% of a core on average ${r.cpu_basis === 'period' ? 'over the period' : 'since it started'}` : null);
+    kv('Memory', r.memory !== null ? `${formatBytes(r.memory)} now, ${formatBytes(r.memory_peak)} at peak, of ${formatBytes(r.memory_limit)}` : null);
+    kv('Disk', a.disk ? `logs ${formatBytes(a.disk.logs)}, ${a.disk.image_count ?? '?'} image(s) ${formatBytes(a.disk.images)}` : null);
+    const t = a.traffic;
+    if (t) {
+      kv('Requests', `${formatCount(t.requests)} (${Object.entries(t.by_class).filter(([, v]) => v).map(([k, v]) => `${formatCount(v)} ${k}`).join(', ') || 'none'})`);
+      if (a.websocket) {
+        kv('WebSocket sessions', `${formatCount(t.sessions.count)}${t.sessions.avg_s !== null ? `, ${formatSeconds(t.sessions.avg_s)} on average, longest ${formatSeconds(t.sessions.max_s)}` : ''}`);
+        kv('Upgrades refused', `${formatCount(t.upgrades.refused)} (unsigned or bad signature)${t.upgrades.rate_limited ? `, ${t.upgrades.rate_limited} rate-limited` : ''}${t.upgrades.failed ? `, ${t.upgrades.failed} failed` : ''}`);
+      }
+      kv('App unreachable (5xx)', t.upstream_failed ? formatCount(t.upstream_failed) : null);
+    }
+    kv('Log', `${formatCount(a.log.errors)} errors, ${formatCount(a.log.warnings)} warnings in ${formatCount(a.log.lines)} lines`);
+    for (const ev of a.log.events.slice(0, 12)) {
+      const d = eventDetail(ev, formatCount);
+      line(`    ${formatCount(ev.count).padStart(6)}×  ${ev.name}${d ? `  (${d})` : ''}`);
+    }
+    for (const x of a.log.top) line(`    [${x.severity === 'error' ? 'ERROR' : 'WARN'}] ${x.count}×  ${x.message}`);
   }
   line();
   line('ALL CHECKS');

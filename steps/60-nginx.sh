@@ -27,6 +27,11 @@ EOF
   # The apps in config/apps/: a request limit each, and the Connection header a WebSocket upgrade needs.
   if apps_any; then
     app_each _nginx_app_zone
+    # The apps' access logs: nginx's combined format, then the request time and the Upgrade header, so the
+    # nightly report (lib/report.sh) can tell WebSocket sessions, and how long each lasted, from other requests.
+    cat <<'EOF'
+log_format cx_app '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_time "$http_upgrade"';
+EOF
     if apps_any_websocket; then
       printf 'map $http_upgrade $cx_connection_upgrade {\n\tdefault upgrade;\n\t"" close;\n}\n'
     fi
@@ -183,7 +188,7 @@ server {
 	listen [::]:443 ssl;
 	server_name $APP_FQDN;
 $(_nginx_tls_lines "$APP_FQDN")
-	access_log /var/log/nginx/cx-app-$APP_NAME.access.log;
+	access_log /var/log/nginx/cx-app-$APP_NAME.access.log cx_app;
 	client_max_body_size 1m;
 
 EOF

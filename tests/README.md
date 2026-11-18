@@ -144,6 +144,29 @@ holds the checks; run it after an apply: `tests/vps.sh exec bash -s < tests/main
   - Boot time came from `/proc/uptime`, which inside a container is the host's. It now comes from PID 1's age.
   - The settle job went on waiting after its window had been ended.
 
+## The apps in the nightly report (2026-11-18)
+
+`lib/report.sh` (`_rpt_apps`) gathers a section per app, `stack/health/src/app-report.mjs` reads it, and app sites log
+in the `cx_app` format (`steps/60-nginx.sh`).
+
+- **`cd stack/health && npm test`: 120 of 120**, of them 9 new in `test/app-report.test.mjs`, on the relay's real log
+  lines. They check:
+  - Multi-line entries are joined.
+  - Events keep their name, numbers and enum values; no call id, phone number or caller's words survive, in the
+    model, the HTML or the text.
+  - A healthy relay is no warning.
+  - Unhealthy, restarted, a certificate under 21 days, `fallback.xml` not served and WebSocket 502s are each
+    flagged.
+  - An error spike is a warning, and the same count on a usual day a note.
+  - A missing container, a redeploy, an app that couldn't be gathered, and no apps at all.
+- **`tests/report-nginx-test.sh`: 10 of 10**, the access-log reading, on macOS's awk and on Debian 13's mawk
+  (`docker run … debian:trixie`, in the script's header).
+- **Against the live server, read-only:** the new `lib/report.sh` was piped over SSH with the installed libraries,
+  nothing installed. `_rpt_apps` took about a second, and the whole gather 2.6 s. Its output, rendered by this
+  digest, is `report-preview.html`.
+- **Not run yet:** the new checks in `tests/apps-test.sh` ("the nightly report"). They need the app VPS setup
+  above.
+
 ## App containers (2026-11-18)
 
 `steps/95-apps.sh` (docs/Apps.md) on Debian 13, with the test config plus one app,

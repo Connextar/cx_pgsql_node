@@ -139,6 +139,25 @@ t "apply removes the second app's nginx site" sh -c "$SETUP apply nginx >/dev/nu
 t "cx-pgsql app list" sh -c "cx-pgsql app list | grep -q '^$APP .*running'"
 t "certbot's deploy hook still runs" /opt/cx-pgsql/lib/tls-deploy-hook.sh
 
+echo "── the nightly report (lib/report.sh _rpt_apps, src/app-report.mjs)"
+R=/var/lib/cx-pgsql/report
+t "the app's site logs in the cx_app format (request time, Upgrade header)" grep -q 'access.log cx_app;' /etc/nginx/sites-available/cx-app-$APP.conf
+signed=$(upgrade "$(twilio_sig)")
+t "a signed WebSocket session (101) for the report to count" test "$signed" = 101
+t "report preview builds" cx-pgsql report preview
+t "the email has the app's section" grep -q "^APP CX-SUPPORT-RELAY ($FQDN)" $R/last.txt
+t "health endpoint 200, fallback served by GET and POST" sh -c "grep -qE 'Health endpoint +200 in' $R/last.txt && grep -qE '/fallback.xml +served \(GET 200, POST 200' $R/last.txt"
+t "the WebSocket session and the refused upgrades are counted" sh -c "grep -qE 'WebSocket sessions +[1-9]' $R/last.txt && grep -qE 'Upgrades refused +[1-9]' $R/last.txt"
+t "the relay's refused signatures are counted as events" grep -qE '[0-9]+×  upgrade_signature_invalid' $R/last.txt
+t "CPU, memory and the certificate are there" sh -c "grep -qE '^  CPU +[0-9.]+% of a core' $R/last.txt && grep -qE '^  Memory +[0-9.]+ MiB now' $R/last.txt && grep -qE 'TLS certificate +[0-9]+ days left' $R/last.txt"
+t "no call id, address or token in the email" sh -c "! grep -qE 'CA[0-9a-f]{32}|172\.1[6-9]\.[0-9]+\.[0-9]+|$TOKEN' $R/last.txt $R/last.html"
+docker stop "$C" >/dev/null
+t "a stopped relay is a problem at the top of the email" sh -c "cx-pgsql report preview >/dev/null && grep -A2 '^NEEDS ATTENTION' $R/last.txt | grep -q '\[FAIL\] $APP: The container is exited'"
+t "and its fallback is still served" grep -qE '/fallback.xml +served' $R/last.txt
+docker start "$C" >/dev/null
+for _ in $(seq 60); do serves '^ok ' && break; sleep 1; done
+t "started again" serves "^ok "
+
 echo "── teardown"
 t "teardown apps" $SETUP teardown apps --yes
 t "container gone" not docker inspect "$C"
