@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # App container tests (steps/95-apps.sh, lib/apps.sh), run as root inside the test VPS after a full
 # apply with one app, config/apps/cx-support-relay.env from example.env.sample, but:
-#   APP_FQDN=relay-test.example.invalid   APP_REPO=/srv/git/cx-support.git (a bare copy of cx-support)
+#   APP_FQDN=relay-test.example.invalid   APP_REPO=/srv/git/cx-support.git (a bare copy of cx-support,
+#   APP_STATIC=services/voice-relay/static holding fallback.xml)
 #   VOICE_RELAY_URL=wss://relay-test.example.invalid/relay
 # and its secrets set with TWILIO_AUTH_TOKEN=test-token-123 (bin/remote.sh app-secrets … --from <file>).
 # Usage: tests/vps.sh exec bash -s < tests/apps-test.sh
@@ -19,6 +20,7 @@ has() { grep -q -- "$1" /tmp/t.out; }
 
 health() { curl -sk --max-time 5 --resolve "$FQDN:443:127.0.0.1" "https://$FQDN/healthz"; }
 serves() { health | grep -qE "$1"; }
+serves_file() { curl -sk --max-time 5 --resolve "$FQDN:443:127.0.0.1" "https://$FQDN$1" | grep -q "$2"; }
 # A WebSocket upgrade through nginx; prints the status code (101 = upgraded). $1: the signature, or empty.
 upgrade() {
   local sig=()
@@ -39,6 +41,18 @@ t "a wrong signature refused (403)" test "$(upgrade 'bm90IGEgc2lnbmF0dXJl')" = 4
 t "Twilio-signed upgrade passes nginx and the relay (101)" test "$(upgrade "$(twilio_sig)")" = 101
 t "plain HTTP redirects to HTTPS" sh -c "curl -s -o /dev/null -w '%{http_code}' -H 'Host: $FQDN' http://127.0.0.1/healthz | grep -qx 301"
 t "nginx: an hour for a WebSocket" grep -q 'proxy_read_timeout 3600s' /etc/nginx/sites-available/$C.conf
+
+echo "── static files (APP_STATIC): the 0800 number's fallback TwiML"
+t "GET /fallback.xml → 200 text/xml" sh -c "test \"\$(curl -sk --resolve $FQDN:443:127.0.0.1 -o /tmp/body -w '%{http_code} %{content_type}' https://$FQDN/fallback.xml)\" = '200 text/xml'"
+t "it is the TwiML: Say, then Hangup" sh -c "grep -q '<Say language=\"en-GB\" voice=\"Polly.Arthur-Neural\">Sorry, this line' /tmp/body && grep -q '<Hangup/>' /tmp/body"
+t "POST /fallback.xml (as Twilio may) → 200 and the same file" sh -c "test \"\$(curl -sk --resolve $FQDN:443:127.0.0.1 -X POST -d CallSid=CA1 -o /tmp/body2 -w '%{http_code}' https://$FQDN/fallback.xml)\" = 200 && cmp -s /tmp/body /tmp/body2"
+t "published read-only to nginx: root-owned 0644" test "$(stat -c %U:%a /var/www/cx-apps/$APP/fallback.xml)" = root:644
+docker stop "$C" >/dev/null
+t "still answers with the relay stopped" sh -c "test \"\$(curl -sk --resolve $FQDN:443:127.0.0.1 -o /dev/null -w '%{http_code}' https://$FQDN/fallback.xml)\" = 200"
+t "while /healthz goes to the (stopped) app: 502" test "$(curl -sk --resolve "$FQDN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$FQDN/healthz")" = 502
+docker start "$C" >/dev/null
+for _ in $(seq 1 30); do [[ "$(docker inspect -f '{{.State.Health.Status}}' "$C")" == healthy ]] && break; sleep 1; done
+t "relay back: /healthz and the signed upgrade still reach it" sh -c "curl -sk --resolve $FQDN:443:127.0.0.1 https://$FQDN/healthz | grep -q '^ok' && test \"\$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' --http1.1 --resolve $FQDN:443:127.0.0.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'X-Twilio-Signature: $(twilio_sig)' https://$FQDN/relay)\" = 101"
 
 echo "── locked down"
 insp() { docker inspect -f "$1" "$C"; }
@@ -78,17 +92,25 @@ t "not restarted" test "$(started)" = "$before"
 
 echo "── a new commit: a warning, then a deploy"
 old=$(commit)
+EXTRA="extra-$(date +%s).txt"
 rm -rf /tmp/w && git clone -q /srv/git/cx-support.git /tmp/w
-(cd /tmp/w && echo "// test $(date +%s)" >>services/voice-relay/main.ts && git -c user.name=t -c user.email=t@t commit -qam 'test: a change' && git push -q origin main)
+(cd /tmp/w && echo "// test $(date +%s)" >>services/voice-relay/main.ts && echo extra >"services/voice-relay/static/$EXTRA" &&
+  echo hidden >services/voice-relay/static/.hidden && ln -sf /etc/passwd services/voice-relay/static/passwd &&
+  git add -A && git -c user.name=t -c user.email=t@t commit -qm 'test: a change, with static files' && git push -q origin main)
 new=$(git -C /tmp/w rev-parse --short=7 HEAD)
 t "status warns that main has moved on" sh -c "$SETUP status apps | grep -q '! $APP: the newest commit'"
 t "still running the old commit" serves " $old\$"
 t "cx-pgsql app deploy" cx-pgsql app deploy $APP
 t "now running the new commit" serves " $new\$"
+t "the new static file is served" serves_file "/$EXTRA" extra
+t "a symlink in the folder isn't published" test ! -e /var/www/cx-apps/$APP/passwd
+t "nor a dot-file" test ! -e /var/www/cx-apps/$APP/.hidden
+t "/passwd doesn't give /etc/passwd" not serves_file /passwd root:
 t "the previous image is kept" test -s "$DIR/.previous-image"
 t "two images, no more" test "$(docker image ls cx-app/$APP -q | wc -l)" = 2
 t "cx-pgsql app rollback" cx-pgsql app rollback $APP
 t "back on the old commit" serves " $old\$"
+t "and its static files with it ($EXTRA gone)" test ! -e "/var/www/cx-apps/$APP/$EXTRA"
 t "status after rollback: DONE (with the newer-commit warning)" sh -c "$SETUP status apps"
 t "deploy again" cx-pgsql app deploy $APP
 t "on the new commit again" serves " $new\$"

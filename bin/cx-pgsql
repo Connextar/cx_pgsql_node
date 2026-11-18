@@ -438,7 +438,7 @@ _app_remove() {
   docker rm -f "cx-app-$APP_NAME" >/dev/null 2>&1 || true
   docker network rm "cx-app-$APP_NAME" >/dev/null 2>&1 || true
   docker image ls "$APP_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' | xargs -r docker image rm >/dev/null 2>&1 || true
-  rm -rf "${APP_DIR:?}"
+  rm -rf "${APP_DIR:?}" "/var/www/cx-apps/${APP_NAME:?}"
   ok "Removed $APP_NAME (container, images, checkout). Its secrets stay: ls $SECRETS_DIR | grep '^app-$APP_NAME-'"
 }
 

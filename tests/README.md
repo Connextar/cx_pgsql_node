@@ -176,6 +176,13 @@ checks: `tests/vps.sh exec bash -s < tests/apps-test.sh`. It commits to that bar
       key is accepted: the refusal is "Permission denied", not a host-key error.
     - Taking the file out removes its nginx site. certbot's deploy hook still runs.
   - **Teardown** removes the container and images, keeps the checkout; apply brings it back.
+- **Static files (`APP_STATIC`), second fresh run (2026-11-18): 74 of 74**, then a second apply that changed
+  nothing.
+  - `/fallback.xml` (cx-support's 0800 fallback TwiML): GET and POST both return 200 `text/xml` with the same file.
+    It still answers with the relay stopped (`/healthz` 502 meanwhile), and before the relay has ever run (a secret
+    missing). It's published root-owned 0644.
+  - A commit that adds a file, a dot-file and a symlink to `/etc/passwd`: only the file is published, and `/passwd`
+    doesn't give `/etc/passwd`. Rollback takes the folder back to the old commit's.
 - **Found and fixed on the way:**
   - Compose refuses `pids_limit` beside `deploy.resources.limits`, so it's `limits.pids`.
   - The checkout was made root-only (`chmod -R go-rwx`). `COPY` carried that into the image, where the relay (uid

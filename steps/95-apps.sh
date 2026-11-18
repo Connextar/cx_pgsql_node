@@ -24,6 +24,7 @@ _apps_check_one() {
     while IFS='|' read -r file mode gen; do
       chk_render "$APP_NAME: $file" "$APP_DIR/$file" "$gen"
     done < <(_app_files)
+    app_has_static && chk "$APP_NAME: static files from $APP_STATIC published in $(app_static_dir)" app_static_ok
     chk "$APP_NAME: image $(app_image) built" app_image_built
     chk "$APP_NAME: container running and healthy" app_running
     chk "$APP_NAME: container matches its configuration" app_up_to_date
@@ -69,7 +70,9 @@ _apps_apply_one() {
   if ! app_checked_out; then
     app_fetch || return 0
   fi
-  # Built before the secrets are in: none goes into the image, and setting them then only starts it.
+  # Before the secrets: the static files need none (the fallback answers even before the app first runs),
+  # and none goes into the image, so setting them then only starts it.
+  if app_has_static && ! app_static_ok; then app_static_publish; fi
   app_image_built || app_build || return 0
   missing=$(app_missing_secrets | tr '\n' ' ')
   if [[ -n "${missing// /}" ]]; then
@@ -95,7 +98,7 @@ _apps_teardown_one() {
   [[ -f "$APP_DIR/compose.yml" ]] && { app_compose down --remove-orphans || true; }
   docker image ls "$APP_IMAGE_REPO" --format '{{.Repository}}:{{.Tag}}' | xargs -r docker image rm >/dev/null 2>&1 || true
   if ((PURGE)); then
-    rm -rf "${APP_DIR:?}"
+    rm -rf "${APP_DIR:?}" "$(app_static_dir)"
     info "$APP_NAME: removed, with its checkout. Its secrets stay under $SECRETS_DIR (app-$APP_NAME-*)."
   else
     info "$APP_NAME: stopped and removed. The checkout in $APP_DIR is kept (--purge deletes it)."

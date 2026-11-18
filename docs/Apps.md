@@ -1,7 +1,7 @@
 # App containers
 
 Small services that need a server rather than Vercel run here, beside the databases. The first is
-cx-support's **voice relay** (`relay.support.connextar.com`). It holds a WebSocket for every phone call, which Vercel
+cx-support's **voice relay** (`relay-support.connextar.com`). It holds a WebSocket for every phone call, which Vercel
 functions can't do. Render would have cost another $7 a month for one small process; this server has the room.
 
 Each app is one file, `config/apps/<app>.env` (template: `config/apps/example.env.sample`; your files are
@@ -22,6 +22,10 @@ git-ignored). The `apps` step (`steps/95-apps.sh`, `lib/apps.sh`) does the rest:
   - With `APP_WEBSOCKET=true`, nginx passes the upgrade on and keeps the connection up to an hour.
   - The site is `/etc/nginx/sites-available/cx-app-<app>.conf`; one left behind by an app taken out of config is
     removed.
+- **Static files** (`APP_STATIC`, optional): a folder of the repository that nginx serves itself, before the
+  container. It's for an answer that must still come when the app is down. Published as a copy in
+  `/var/www/cx-apps/<app>`: regular files only, no links or dot-files, refreshed whenever the commit changes. A POST
+  for a file gets the file too.
 - **Settings:**
   - `APP_ENV`'s plain values go in `app.env`.
   - Each name in `APP_SECRETS` is a root-only secret, `app-<app>-<NAME>`, set from your machine and copied into
@@ -48,10 +52,16 @@ bin/remote.sh cx app rollback cx-support-relay # the image that ran before the l
 
 ## Setting up cx-support's voice relay
 
-1. **DNS:** an A record `relay.support.connextar.com` → this server's address (`SERVER_IP`).
+1. **DNS:** an A record `relay-support.connextar.com` → this server's address (`SERVER_IP`). In Cloudflare, set it
+   to **DNS only** (grey cloud), not proxied:
+   - The `tls` step asks Let's Encrypt for a certificate only once the name resolves to this server. Proxied, it
+     resolves to Cloudflare, and the name would keep its self-signed certificate.
+   - Proxied, Cloudflare would carry every call's live conversation: one more processor of callers' data.
+   - Cloudflare's free certificate covers only one level below `connextar.com`, hence `relay-support`, not
+     `relay.support`.
 2. **Config:** `config/apps/cx-support-relay.env` (already written: `example.env.sample` is this app's). Check the
    plain settings: `VOICE_APP_URL=https://support.connextar.com` and
-   `VOICE_RELAY_URL=wss://relay.support.connextar.com/relay`. The relay checks Twilio's signature against that exact
+   `VOICE_RELAY_URL=wss://relay-support.connextar.com/relay`. The relay checks Twilio's signature against that exact
    URL.
 3. **Deploy key:** `bin/remote.sh app-key cx-support-relay --github` makes the key on the server and adds it to
    `Connextar/cx-support` as a read-only deploy key (needs `gh`, signed in). Without `--github` it prints the key, to
@@ -63,9 +73,12 @@ bin/remote.sh cx app rollback cx-support-relay # the image that ran before the l
      which starts the relay.
    - Without `--from` it asks for each one (hidden; an empty answer keeps the current value).
    - Name some to set only those: `… app-secrets cx-support-relay ANTHROPIC_API_KEY`.
-6. **Check:** `curl https://relay.support.connextar.com/healthz` answers `ok 0.2.0 <commit>`. Then set `VOICE_RELAY_URL`
+6. **Check:** `curl https://relay-support.connextar.com/healthz` answers `ok 0.2.0 <commit>`, and
+   `curl -i https://relay-support.connextar.com/fallback.xml` answers 200, `text/xml`, with the TwiML. That URL is
+   the 0800 number's **Primary handler fails** in Twilio, method GET. nginx serves it from disk, so callers hear
+   "Sorry, this line isn't available…" even when Vercel or the relay is down. Then set `VOICE_RELAY_URL`
    on the app in Vercel (cx-support's `docs/Telephony.md`, "Hosting").
-7. **Watch it:** add `https://relay.support.connextar.com/healthz` to the uptime monitor beside this server's
+7. **Watch it:** add `https://relay-support.connextar.com/healthz` to the uptime monitor beside this server's
    `/healthz`. The server's own health and report don't include apps: a relay problem never marks the database server
    down.
 

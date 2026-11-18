@@ -186,8 +186,24 @@ $(_nginx_tls_lines "$APP_FQDN")
 	access_log /var/log/nginx/cx-app-$APP_NAME.access.log;
 	client_max_body_size 1m;
 
+EOF
+  if app_has_static; then
+    # Its static files first, straight from disk (they answer when the app is down), then the app.
+    cat <<EOF
+	root $(app_static_dir);
 	location / {
 		limit_req zone=$(_nginx_app_zone_name) burst=$APP_RATE_BURST nodelay;
+		try_files \$uri @app;
+		# A file answers a POST too (Twilio may ask either way): nginx's 405 becomes the file, fetched as GET.
+		error_page 405 =200 \$uri;
+	}
+	# Reached from location / only, whose request limit has already counted the request.
+	location @app {
+EOF
+  else
+    printf '\tlocation / {\n\t\tlimit_req zone=%s burst=%s nodelay;\n' "$(_nginx_app_zone_name)" "$APP_RATE_BURST"
+  fi
+  cat <<EOF
 		proxy_pass http://127.0.0.1:$APP_PORT;
 		proxy_http_version 1.1;
 EOF

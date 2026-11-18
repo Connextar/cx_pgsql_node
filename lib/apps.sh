@@ -26,7 +26,7 @@ APP_GITHUB_HOST_KEY='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0
 _app_defaults() {
   APP_NAME='' APP_FQDN='' APP_REPO='' APP_REF=main APP_DOCKERFILE=Dockerfile APP_CONTEXT=.
   APP_PORT='' APP_CONTAINER_PORT='' APP_HEALTH_PATH=/healthz APP_WEBSOCKET=false
-  APP_MEMORY_LIMIT=512m APP_CPUS=1.0 APP_SECRETS='' APP_ENV='' APP_RATE_LIMIT=10r/s APP_RATE_BURST=40
+  APP_MEMORY_LIMIT=512m APP_CPUS=1.0 APP_SECRETS='' APP_ENV='' APP_RATE_LIMIT=10r/s APP_RATE_BURST=40 APP_STATIC=''
 }
 
 _app_finalize() {
@@ -43,6 +43,7 @@ _app_finalize() {
   [[ "$APP_HEALTH_PATH" == /* ]] || die "$APP_FILE: APP_HEALTH_PATH must start with /."
   [[ "$APP_DOCKERFILE" != /* && "$APP_DOCKERFILE" != *..* && "$APP_CONTEXT" != /* && "$APP_CONTEXT" != *..* ]] ||
     die "$APP_FILE: APP_DOCKERFILE and APP_CONTEXT are paths inside the repository."
+  [[ -z "$APP_STATIC" || ( "$APP_STATIC" != /* && "$APP_STATIC" != *..* ) ]] || die "$APP_FILE: APP_STATIC is a folder inside the repository."
   for p in $APP_SECRETS; do
     [[ "$p" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "$APP_FILE: secret name '$p' must be UPPER_CASE."
   done
@@ -51,7 +52,7 @@ _app_finalize() {
   APP_PROJECT="cx-app-$APP_NAME"
   APP_IMAGE_REPO="cx-app/$APP_NAME"
   export APP_NAME APP_FQDN APP_REPO APP_REF APP_DOCKERFILE APP_CONTEXT APP_PORT APP_CONTAINER_PORT \
-    APP_HEALTH_PATH APP_WEBSOCKET APP_MEMORY_LIMIT APP_CPUS APP_SECRETS APP_ENV APP_RATE_LIMIT APP_RATE_BURST \
+    APP_HEALTH_PATH APP_WEBSOCKET APP_MEMORY_LIMIT APP_CPUS APP_SECRETS APP_ENV APP_RATE_LIMIT APP_RATE_BURST APP_STATIC \
     APP_FILE APP_DIR APP_CONTAINER APP_PROJECT APP_IMAGE_REPO
 }
 
@@ -281,6 +282,50 @@ app_write_files() {
   return 0
 }
 
+# ─── Static files (APP_STATIC) ─────────────────────────────────────────────────────
+# A folder of the repository that nginx serves itself, ahead of the container: an answer that must
+# still come when the app is down (cx-support's fallback.xml, the 0800 number's "Primary handler
+# fails" TwiML). Published as a copy readable by nginx: regular files only, no links, no dot-files.
+app_static_dir() { printf '/var/www/cx-apps/%s' "$APP_NAME"; }
+app_has_static() { [[ -n "$APP_STATIC" ]]; }
+# What the published copy should hold, as "mode path" lines, from the checkout.
+_app_static_list() {
+  local src
+  src="$(app_src)/$APP_STATIC"
+  [[ -d "$src" ]] || return 0
+  (cd "$src" && find . -mindepth 1 -type f -not -path '*/.*' -printf '%P\n' | LC_ALL=C sort)
+}
+app_static_ok() {
+  local dir want have f
+  dir=$(app_static_dir)
+  [[ -d "$dir" ]] || return 1
+  want=$(_app_static_list)
+  have=$(cd "$dir" && find . -mindepth 1 -not -type d -printf '%P\n' | LC_ALL=C sort)
+  [[ "$want" == "$have" ]] || return 1
+  while read -r f; do
+    [[ -z "$f" ]] && continue
+    cmp -s "$(app_src)/$APP_STATIC/$f" "$dir/$f" || return 1
+  done <<<"$want"
+}
+app_static_publish() {
+  local dir new f
+  dir=$(app_static_dir)
+  new="$dir.new"
+  [[ -d "$(app_src)/$APP_STATIC" ]] || warn "$APP_NAME: APP_STATIC ($APP_STATIC) isn't a folder at $(app_short): nothing to serve."
+  rm -rf "$new"
+  install -d -m 0755 "$new"
+  while read -r f; do
+    [[ -z "$f" ]] && continue
+    install -D -m 0644 -o root -g root "$(app_src)/$APP_STATIC/$f" "$new/$f"
+  done < <(_app_static_list)
+  find "$new" -type d -exec chmod 0755 {} +
+  rm -rf "$dir.old"
+  [[ -d "$dir" ]] && mv "$dir" "$dir.old"
+  mv "$new" "$dir"
+  rm -rf "$dir.old"
+  info "$APP_NAME: published $(_app_static_list | grep -c . || true) static file(s) from $APP_STATIC"
+}
+
 # ─── The container ─────────────────────────────────────────────────────────────────
 app_compose() { (cd "$APP_DIR" && docker compose -p "$APP_PROJECT" "$@"); }
 
@@ -324,6 +369,7 @@ app_loopback_ok() { curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$APP_P
 
 app_start() {
   local previous
+  if app_has_static && ! app_static_ok; then app_static_publish; fi
   previous=$(docker inspect -f '{{.Config.Image}}' "$APP_CONTAINER" 2>/dev/null || true)
   info "$APP_NAME: starting $(app_image)"
   if ! app_compose up -d --wait --wait-timeout 120 --remove-orphans; then
