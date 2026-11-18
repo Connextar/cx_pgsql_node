@@ -69,6 +69,10 @@ _apps_apply_one() {
   local missing
   if ! app_checked_out; then
     app_fetch || return 0
+  elif [[ ! -f "$(app_src)/$APP_DOCKERFILE" ]] && ! app_image_built; then
+    # A checkout that can't be built (made before the Dockerfile reached APP_REF) is no deploy to keep: fetch again.
+    info "$APP_NAME: $(app_short) has no $APP_DOCKERFILE — fetching $APP_REF again"
+    app_fetch || return 0
   fi
   # Before the secrets: the static files need none (the fallback answers even before the app first runs),
   # and none goes into the image, so setting them then only starts it.
